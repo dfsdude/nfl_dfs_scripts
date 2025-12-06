@@ -5,44 +5,43 @@ Uses data/ loaders and components/ for visualization
 """
 
 import streamlit as st
-from data.data_loader import (
-    load_roo_projections, load_matchups, load_sharp_offense, 
-    load_sharp_defense, load_weekly_proe
-)
-from utils.constants import TEAM_MAPPING
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+parent_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(parent_dir))
+
+from utils.data_manager import DataManager
 
 st.title("⭐ Top Stacks & Boom/Bust Tool")
 st.caption("Player-level Boom/Bust model + matchup-aware stack explorer powered by ROO simulations")
 
-# Load data using modular loaders
-try:
-    with st.spinner("📊 Loading data from centralized loaders..."):
-        roo_projections = load_roo_projections()
-        matchups = load_matchups()
-        sharp_offense = load_sharp_offense()
-        sharp_defense = load_sharp_defense()
-        weekly_proe = load_weekly_proe()
+# Show data status for this tool
+DataManager.show_tool_data_status("Top Stacks")
+
+# Check if required data is loaded
+required_files = ['roo_projections', 'matchups', 'sharp_offense', 'sharp_defense', 'weekly_proe']
+
+if DataManager.require_data(required_files, "Top Stacks"):
+    
+    import pandas as pd
+    
+    # Get data from global cache
+    try:
+        with st.spinner("📊 Loading data..."):
+            roo_projections = DataManager.get_data('roo_projections')
+            matchups = DataManager.get_data('matchups')
+            sharp_offense = DataManager.get_data('sharp_offense')
+            sharp_defense = DataManager.get_data('sharp_defense')
+            weekly_proe = DataManager.get_data('weekly_proe')
         
-    st.success(f"✅ Loaded: {len(roo_projections)} projections, {len(matchups)} matchups")
-    
-    # Import and run the core logic (temporarily using modules until full refactor)
-    import sys
-    from pathlib import Path
-    
-    parent_dir = Path(__file__).parent.parent
-    sys.path.insert(0, str(parent_dir))
-    
-    from modules import top_stacks
-    top_stacks.run()
-    
-except FileNotFoundError as e:
-    st.error(f"❌ **Data File Not Found**: {e}")
-    st.info("💡 Check that all required CSV files are in the Dashboard directory")
-except Exception as e:
-    st.error(f"❌ **Error**: {e}")
-    st.markdown("""
-    **Workaround**: Run the standalone version:
-    ```bash
-    streamlit run top_stacks_tool.py
-    ```
-    """)
+        st.success(f"✅ Loaded: {len(roo_projections)} projections, {len(matchups)} matchups")
+        
+        # Import and run the core logic
+        from modules import top_stacks
+        top_stacks.run()
+        
+    except Exception as e:
+        st.error(f"❌ **Error loading data**: {e}")
+        st.info("💡 Make sure all CSV files have the correct format and column names")

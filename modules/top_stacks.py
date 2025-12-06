@@ -6,6 +6,22 @@ import itertools
 import os
 from pathlib import Path
 
+# Import correlation module
+try:
+    import sys
+    parent_dir = Path(__file__).parent.parent
+    sys.path.insert(0, str(parent_dir))
+    from correlation_model import (
+        build_team_player_roles,
+        compute_team_correlations,
+        get_correlation_rag,
+        get_correlation_label
+    )
+    CORRELATION_AVAILABLE = True
+except ImportError:
+    CORRELATION_AVAILABLE = False
+
+
 # --------------------------------------------------------
 # Configuration Constants
 # --------------------------------------------------------
@@ -143,6 +159,21 @@ def load_data():
             weekly_proe = pd.read_csv(data_dir / "weekly_proe_2025.csv")
             weekly_stats = pd.read_csv(data_dir / "Weekly_Stats.csv")
             
+            # Load or compute correlation scores
+            team_correlations = None
+            if CORRELATION_AVAILABLE:
+                try:
+                    st.info("📊 Computing player correlations...")
+                    roles_df = build_team_player_roles(weekly_stats)
+                    team_correlations = compute_team_correlations(weekly_stats, roles_df, min_weeks=4)
+                    st.success(f"✅ Computed correlations for {len(team_correlations)} teams")
+                except Exception as e:
+                    st.warning(f"⚠️ Could not compute correlations: {str(e)}")
+                    team_correlations = None
+            
+            # Concentration module removed - not using 2024 data for 2025 season
+            concentration_df = None
+            
             # Rename ROO columns to match expected format
             players = players.rename(columns={
                 'Player': 'name',
@@ -156,7 +187,9 @@ def load_data():
                 'Floor_Proj': 'floor_25',
                 'Sim_P75': 'ceil_75',
                 'effective_std_fpts': 'stddev',
-                'Volatility_Index': 'volatility_index'
+                'Volatility_Index': 'volatility_index',
+                'hist_max_fpts': 'max_dk',
+                'hist_mean_fpts': 'avg_dk'
             })
             
             # Add derived columns that might be missing
@@ -166,6 +199,7 @@ def load_data():
             if 'stddev' not in players.columns:
                 players['stddev'] = np.sqrt(players['var_dk'])
             
+            # Only add max_dk and avg_dk if they weren't loaded from ROO projections
             if 'max_dk' not in players.columns:
                 players['max_dk'] = players['ceiling_ows']
             
@@ -379,10 +413,13 @@ def load_data():
     team_offense_dict = sharp_offense.set_index("Team").to_dict(orient="index")
     team_defense_dict = sharp_defense.set_index("Team").to_dict(orient="index")
     
-    return players, matchups, matchup_dict, matchup_expanded, team_offense_dict, team_defense_dict
+    # Concentration feature removed
+    
+    return players, matchups, matchup_dict, matchup_expanded, team_offense_dict, team_defense_dict, team_correlations
 
 
-df, matchups, matchup_dict, matchup_expanded, team_offense_dict, team_defense_dict = load_data()
+df, matchups, matchup_dict, matchup_expanded, team_offense_dict, team_defense_dict, team_correlations = load_data()
+concentration_df = None  # Removed concentration feature
 
 
 # --------------------------------------------------------
@@ -455,6 +492,36 @@ def run():
 
         qbs = df_in[df_in["position"] == "QB"]
         results = []
+        
+        # Pre-compute Weekly_Stats pace data ONCE instead of per-stack
+        pace_data = {}
+        rush_pct_data = {}
+        pass_att_data = {}
+        try:
+            data_dir = Path(DFSConfig.DATA_DIR)
+            weekly_stats = pd.read_csv(data_dir / "Weekly_Stats.csv")
+            recent_weeks = weekly_stats["Week"].max()
+            lookback = 4
+            recent_stats = weekly_stats[weekly_stats["Week"] > (recent_weeks - lookback)].copy()
+        
+            team_pace = recent_stats.groupby("Team").agg({
+                "Pass_Att": "sum",
+                "Rush_Att": "sum"
+            }).reset_index()
+        
+            team_pace["Total_Plays"] = team_pace["Pass_Att"] + team_pace["Rush_Att"]
+            team_pace["Plays_Per_Game"] = (team_pace["Total_Plays"] / lookback)
+            
+            # Pre-build dictionaries for fast lookup
+            for _, row in team_pace.iterrows():
+                team = row["Team"]
+                pace_data[team] = float(row["Plays_Per_Game"])
+                pass_att_data[team] = float(row["Pass_Att"]) / lookback
+                total = float(row["Total_Plays"])
+                rush = float(row["Rush_Att"])
+                rush_pct_data[team] = (rush / total) * 100 if total > 0 else 50.0
+        except:
+            pass  # Will use defaults
 
         for _, qb in qbs.iterrows():
             team = qb["team"]
@@ -490,7 +557,9 @@ def run():
             else:
                 team_size = 3
 
-            team_combos = list(itertools.combinations(team_skill.to_dict("records"), team_size))
+            # Convert to list of dicts once
+            team_skill_list = team_skill.to_dict("records")
+            team_combos = list(itertools.combinations(team_skill_list, team_size))
 
             # Pre-sort bring-back candidates once (if needed)
             bringback_candidates = []
@@ -513,10 +582,93 @@ def run():
                     .head(3)
                     .to_dict('records')
                 )
+            
+            # Pre-compute Sharp Football metrics for this matchup ONCE
+            abbrev_to_full = {
+                'ARI': 'Cardinals', 'ATL': 'Falcons', 'BAL': 'Ravens', 'BUF': 'Bills',
+                'CAR': 'Panthers', 'CHI': 'Bears', 'CIN': 'Bengals', 'CLE': 'Browns',
+                'DAL': 'Cowboys', 'DEN': 'Broncos', 'DET': 'Lions', 'GB': 'Packers',
+                'HOU': 'Texans', 'IND': 'Colts', 'JAX': 'Jaguars', 'KC': 'Chiefs',
+                'LAC': 'Chargers', 'LAR': 'Rams', 'LV': 'Raiders', 'MIA': 'Dolphins',
+                'MIN': 'Vikings', 'NE': 'Patriots', 'NO': 'Saints', 'NYG': 'Giants',
+                'NYJ': 'Jets', 'PHI': 'Eagles', 'PIT': 'Steelers', 'SEA': 'Seahawks',
+                'SF': '49ers', 'TB': 'Buccaneers', 'TEN': 'Titans', 'WAS': 'Commanders'
+            }
+        
+            team_full = abbrev_to_full.get(team, team)
+            opp_full = abbrev_to_full.get(opp, opp)
+        
+            team_off_data = team_offense_dict.get(team_full, {})
+            opp_def_data = team_defense_dict.get(opp_full, {})
+            
+            # Pre-compute matchup metrics once per QB
+            try:
+                epa_adv = float(team_off_data.get("EPA_Play", 0)) - float(opp_def_data.get("EPA_Play_Allowed", 0))
+                ypp_adv = float(team_off_data.get("Yards Per Play", 0)) - float(opp_def_data.get("Yards Per Play Allowed", 0))
+                ptd_adv = float(team_off_data.get("Points Per Drive", 0)) - float(opp_def_data.get("Points Per Drive Allowed", 0))
+                exp_adv = float(team_off_data.get("Explosive Play Rate", 0)) - float(opp_def_data.get("Explosive Play Rate Allowed", 0))
+                dcr_adv = float(team_off_data.get("Down Conversion Rate", 0)) - float(opp_def_data.get("Down Conversion Rate Allowed", 0))
+            except Exception:
+                epa_adv = ypp_adv = ptd_adv = exp_adv = dcr_adv = 0.0
+            
+            # Pre-compute game environment score once per QB
+            game_env_score = None
+            td_upside_score = None
+            rush_pct = None
+            try:
+                # Get pace metrics from pre-computed dictionaries
+                team_plays = pace_data.get(team, 60.0)
+                opp_plays = pace_data.get(opp, 60.0)
+                game_plays = (team_plays + opp_plays) / 2
+                
+                team_pass_att = pass_att_data.get(team, 30.0)
+                rush_pct = rush_pct_data.get(team, 50.0)
+            
+                # ITT from matchup
+                team_itt = float(team_matchup.get("ITT", 20))
+            
+                # Normalize and weight components (0-100 scale)
+                plays_score = ((game_plays - 48) / (62 - 48)) * 100
+                pass_score = ((team_pass_att - 26) / (40 - 26)) * 100
+                itt_score = ((team_itt - 13) / (32 - 13)) * 100
+                epa_score = ((epa_adv) + 0.2) / 0.4 * 100
+                ppd_score = ((ptd_adv) + 1.0) / 2.0 * 100
+            
+                # Weighted composite
+                game_env_score = (
+                    plays_score * 0.25 +
+                    pass_score * 0.20 +
+                    itt_score * 0.20 +
+                    epa_score * 0.15 +
+                    ppd_score * 0.20
+                )
+                game_env_score = max(0, min(100, game_env_score))
+            
+                # TD upside based on PPD advantage
+                td_upside_score = ((ptd_adv) + 1.5) / 3.0 * 100
+                td_upside_score = max(0, min(100, td_upside_score))
+            
+            except Exception:
+                game_env_score = 50.0
+                td_upside_score = 50.0
+                rush_pct = 50.0
+            
+            # Pre-compute correlation data once per QB
+            qb_wr_corr_wr = None
+            qb_wr_corr_te = None
+            qb_rb_corr = None
+            if team_correlations is not None and not team_correlations.empty:
+                team_corr_row = team_correlations[team_correlations['Team'] == team]
+                if not team_corr_row.empty:
+                    qb_wr_corr_wr = team_corr_row.iloc[0]['corr_qb_wr1']
+                    qb_wr_corr_te = team_corr_row.iloc[0]['corr_qb_te1']
+                    qb_rb_corr = team_corr_row.iloc[0].get('corr_qb_rb1', None)
+            
+            qb_dict = qb.to_dict()
 
             for combo in team_combos:
 
-                stack_players = [qb.to_dict()] + list(combo)
+                stack_players = [qb_dict] + list(combo)
             
                 # Handle bring-back logic
                 stack_variations = []
@@ -541,10 +693,6 @@ def run():
                     stack_mean = sum(p["proj"] for p in stack_all)
                 
                     # Calculate correlation-adjusted variance
-                    # Var(X+Y) = Var(X) + Var(Y) + 2*Cov(X,Y)
-                    # Cov(X,Y) = rho * std(X) * std(Y)
-                
-                    # Start with sum of individual variances
                     stack_var = sum((p["stddev"] ** 2) for p in stack_all)
                 
                     # Add covariance terms for correlated players
@@ -591,110 +739,6 @@ def run():
                     # New Stack Leverage = Boom% - Total_Own%
                     stack_leverage = (stack_boom_prob * 100) - (total_own * 100)
 
-                    # Compute relative matchup metrics using Sharp Football data
-                    # Team abbreviation to full name mapping
-                    abbrev_to_full = {
-                        'ARI': 'Cardinals', 'ATL': 'Falcons', 'BAL': 'Ravens', 'BUF': 'Bills',
-                        'CAR': 'Panthers', 'CHI': 'Bears', 'CIN': 'Bengals', 'CLE': 'Browns',
-                        'DAL': 'Cowboys', 'DEN': 'Broncos', 'DET': 'Lions', 'GB': 'Packers',
-                        'HOU': 'Texans', 'IND': 'Colts', 'JAX': 'Jaguars', 'KC': 'Chiefs',
-                        'LAC': 'Chargers', 'LAR': 'Rams', 'LV': 'Raiders', 'MIA': 'Dolphins',
-                        'MIN': 'Vikings', 'NE': 'Patriots', 'NO': 'Saints', 'NYG': 'Giants',
-                        'NYJ': 'Jets', 'PHI': 'Eagles', 'PIT': 'Steelers', 'SEA': 'Seahawks',
-                        'SF': '49ers', 'TB': 'Buccaneers', 'TEN': 'Titans', 'WAS': 'Commanders'
-                    }
-                
-                    team_full = abbrev_to_full.get(team, team)
-                    opp_full = abbrev_to_full.get(opp, opp)
-                
-                    team_off_data = team_offense_dict.get(team_full, {})
-                    opp_def_data = team_defense_dict.get(opp_full, {})
-                
-                    try:
-                        epa_adv = float(team_off_data.get("EPA_Play", 0)) - float(opp_def_data.get("EPA_Play_Allowed", 0))
-                        ypp_adv = float(team_off_data.get("Yards Per Play", 0)) - float(opp_def_data.get("Yards Per Play Allowed", 0))
-                        ptd_adv = float(team_off_data.get("Points Per Drive", 0)) - float(opp_def_data.get("Points Per Drive Allowed", 0))
-                        exp_adv = float(team_off_data.get("Explosive Play Rate", 0)) - float(opp_def_data.get("Explosive Play Rate Allowed", 0))
-                        dcr_adv = float(team_off_data.get("Down Conversion Rate", 0)) - float(opp_def_data.get("Down Conversion Rate Allowed", 0))
-                    except Exception:
-                        epa_adv = ypp_adv = ptd_adv = exp_adv = dcr_adv = 0.0
-                
-                    # Game Environment Score (pace + matchup quality + TD upside)
-                    game_env_score = None
-                    td_upside_score = None
-                    rush_pct = None
-                    try:
-                        # Use Sharp Football data with proper team name mapping
-                        team_off = team_offense_dict.get(team_full, {})
-                        opp_def = team_defense_dict.get(opp_full, {})
-                        opp_off = team_offense_dict.get(opp_full, {})
-                    
-                        # Get pace metrics from Weekly_Stats if available
-                        try:
-                            data_dir = Path(DFSConfig.DATA_DIR)
-                            weekly_stats = pd.read_csv(data_dir / "Weekly_Stats.csv")
-                            recent_weeks = weekly_stats["Week"].max()
-                            lookback = 4
-                            recent_stats = weekly_stats[weekly_stats["Week"] > (recent_weeks - lookback)].copy()
-                        
-                            team_pace = recent_stats.groupby("Team").agg({
-                                "Pass_Att": "sum",
-                                "Rush_Att": "sum"
-                            }).reset_index()
-                        
-                            team_pace["Total_Plays"] = team_pace["Pass_Att"] + team_pace["Rush_Att"]
-                            team_pace["Plays_Per_Game"] = (team_pace["Total_Plays"] / lookback)
-                        
-                            team_plays = float(team_pace[team_pace["Team"] == team]["Plays_Per_Game"].iloc[0]) if len(team_pace[team_pace["Team"] == team]) > 0 else 60.0
-                            opp_plays = float(team_pace[team_pace["Team"] == opp]["Plays_Per_Game"].iloc[0]) if len(team_pace[team_pace["Team"] == opp]) > 0 else 60.0
-                            game_plays = (team_plays + opp_plays) / 2
-                        
-                            team_rush = float(team_pace[team_pace["Team"] == team]["Rush_Att"].iloc[0]) if len(team_pace[team_pace["Team"] == team]) > 0 else 0
-                            team_total = float(team_pace[team_pace["Team"] == team]["Total_Plays"].iloc[0]) if len(team_pace[team_pace["Team"] == team]) > 0 else 1
-                            rush_pct = (team_rush / team_total) * 100 if team_total > 0 else 0
-                        
-                            team_pass_att = float(team_pace[team_pace["Team"] == team]["Pass_Att"].iloc[0]) / lookback if len(team_pace[team_pace["Team"] == team]) > 0 else 30.0
-                        except:
-                            # Fallback to default values
-                            game_plays = 60.0
-                            team_pass_att = 30.0
-                            rush_pct = 50.0
-                    
-                        # ITT from matchup
-                        team_itt = float(team_matchup.get("ITT", 20))
-                    
-                        # Normalize and weight components (0-100 scale)
-                        # Game plays: 48-62 range → 0-100
-                        plays_score = ((game_plays - 48) / (62 - 48)) * 100
-                        # Pass attempts: 26-40 range → 0-100
-                        pass_score = ((team_pass_att - 26) / (40 - 26)) * 100
-                        # ITT: 13-32 range → 0-100
-                        itt_score = ((team_itt - 13) / (32 - 13)) * 100
-                        # EPA advantage: -0.2 to 0.2 range → 0-100
-                        epa_score = ((epa_adv) + 0.2) / 0.4 * 100
-                        # PPD advantage as proxy for scoring
-                        ppd_score = ((ptd_adv) + 1.0) / 2.0 * 100
-                    
-                        # Weighted composite: plays(25%) + pass(20%) + ITT(20%) + EPA(15%) + PPD(20%)
-                        game_env_score = (
-                            plays_score * 0.25 +
-                            pass_score * 0.20 +
-                            itt_score * 0.20 +
-                            epa_score * 0.15 +
-                            ppd_score * 0.20
-                        )
-                        game_env_score = max(0, min(100, game_env_score))  # Clamp to 0-100
-                    
-                        # TD upside based on PPD advantage
-                        # Range typically -1.5 to +1.5 → scale to 0-100
-                        td_upside_score = ((ptd_adv) + 1.5) / 3.0 * 100
-                        td_upside_score = max(0, min(100, td_upside_score))
-                    
-                    except Exception as e:
-                        game_env_score = 50.0
-                        td_upside_score = 50.0
-                        rush_pct = 50.0
-
                     # Calculate stack value (projection per $1K salary)
                     stack_value = (total_proj / (total_salary / 1000)) if total_salary > 0 else 0
                 
@@ -706,9 +750,28 @@ def run():
                 
                     # Top Value Score: value efficiency normalized 0-100
                     top_value_raw = stack_value
+                    
+                    # Get correlation data for this stack
+                    qb_wr_corr = None
+                    stack_corr_label = "N/A"
+                    stack_corr_rag = '⚪'
+                    
+                    if qb_wr_corr_wr is not None or qb_wr_corr_te is not None or qb_rb_corr is not None:
+                        # Determine which correlation to show based on stack composition
+                        positions_in_stack = [p['position'] for p in stack_all if p['position'] != 'QB']
+                        if 'WR' in positions_in_stack:
+                            qb_wr_corr = qb_wr_corr_wr
+                        elif 'TE' in positions_in_stack:
+                            qb_wr_corr = qb_wr_corr_te
+                        elif 'RB' in positions_in_stack:
+                            qb_wr_corr = qb_rb_corr
+                        
+                        if qb_wr_corr is not None and not pd.isna(qb_wr_corr):
+                            stack_corr_label = get_correlation_label(qb_wr_corr)
+                            stack_corr_rag = get_correlation_rag(qb_wr_corr)
 
                     results.append({
-                        "QB": qb["name"],
+                        "QB": qb_dict["name"],
                         "Team": team,
                         "Opp": opp,
                         "Players": ", ".join([p["name"] for p in stack_all if p["position"] != "QB"]),
@@ -726,6 +789,9 @@ def run():
                         "Game_Env_Score": round(game_env_score, 1) if game_env_score is not None else None,
                         "TD_Upside": round(td_upside_score, 1) if td_upside_score is not None else None,
                         "Rush_Pct": round(rush_pct, 1) if rush_pct is not None else None,
+                        "QB_Corr": round(qb_wr_corr, 2) if qb_wr_corr is not None else None,
+                        "Corr_Label": stack_corr_label,
+                        "Corr_RAG": stack_corr_rag,
                         "Top_Stack_Raw": top_stack_raw,
                         "Top_Value_Raw": top_value_raw,
                         "EPA_Adv": epa_adv,
@@ -1034,12 +1100,17 @@ def run():
 
         # --------------------------------------------------------
         # Dynamic RAG scaling based on filtered dataset (display_df)
+        # Recalculate quantiles for the current filtered view
         # --------------------------------------------------------
         def rag_relative(df, col, reverse=False):
             """
             reverse=False → high = green (Boom%, Leverage)
             reverse=True  → low = green (Bust%, Own%)
+            
+            Quantiles are calculated dynamically based on the filtered dataframe
+            to ensure RAG colors reflect relative performance within the current view.
             """
+            # Recalculate quantiles based on filtered data
             p33 = df[col].quantile(0.33)
             p66 = df[col].quantile(0.66)
 
@@ -1261,6 +1332,11 @@ def run():
                         - **Boom_Target**: DK points threshold for boom (95th percentile, calibrated to 230+ winning lineups)
                         - **Stack_Boom%**: Probability stack exceeds boom threshold
                         - **Stack_Leverage**: Boom% minus Ownership% (positive = leverage)
+                        - **QB_Corr**: QB ↔ Receiver correlation (-1 to 1, historical performance)
+                          - 🟢 **≥0.4**: Strong positive (spike together - ideal for stacking)
+                          - 🟡 **0.2-0.4**: Moderate positive
+                          - ⚪ **-0.2 to 0.2**: Weak/Independent
+                          - 🔴 **<-0.2**: Negative (cannibalize - avoid stacking)
                         - **Game_Env_Score**: 0-100 composite (pace + volume + ITT + EPA + TD rate)
                         - **TD_Upside**: 0-100 score comparing offense TD rate vs defense TD allowed
                         - **Rush_Pct**: Rush play percentage (lower = more pass volume)
@@ -1304,6 +1380,7 @@ def run():
                     "Stack_Rating", "Top_Stack_Score", "Top_Value_Score",
                     "Total_Proj", "Total_Ceiling_Adj", "Ceiling_vs_Proj", "Ceil_Adj_vs_Proj",
                     "Stack_Value", "Total_Salary", "Total_Own%", "Boom_Target", "Stack_Boom%", "Stack_Leverage",
+                    "QB_Corr", "Corr_Label",
                     "Game_Env_Score", "TD_Upside", "Rush_Pct", "EPA_Adv", "YPP_Adv", "PTD_Adv", "EXP_Adv", "DCR_Adv"
                 ]
             
@@ -1334,6 +1411,9 @@ def run():
             
                 # Create a helper column for styling (will be removed from display)
                 display_df = stack_df[display_cols].copy()
+                
+                # Convert None values to NaN for proper formatting
+                display_df = display_df.fillna(value=pd.NA)
             
                 # Color function for Boom_Target
                 def color_boom_target(row):
@@ -1344,6 +1424,19 @@ def run():
                     else:
                         styles[boom_idx] = 'background-color: #2ECC71; color: black;'
                     return styles
+                
+                # Color function for correlation
+                def corr_color(val):
+                    if pd.isna(val) or val is None:
+                        return ""
+                    if val >= 0.4:
+                        return "background-color: #2ECC71; color: black;"  # Strong positive
+                    elif val >= 0.2:
+                        return "background-color: #F1C40F; color: black;"  # Moderate positive
+                    elif val >= -0.2:
+                        return "background-color: #F8F9FA; color: black;"  # Neutral
+                    else:
+                        return "background-color: #E74C3C; color: white;"  # Negative
             
                 # Apply styling
                 styled_stacks = (
@@ -1351,7 +1444,7 @@ def run():
                     .format("{:.1f}", subset=["Stack_Rating", "Top_Stack_Score", "Top_Value_Score",
                                                "Total_Proj", "Total_Ceiling_Adj", "Ceiling_vs_Proj", "Ceil_Adj_vs_Proj",
                                                "Boom_Target", "Stack_Boom%", "Stack_Leverage", "Game_Env_Score", "TD_Upside", "Rush_Pct"])
-                    .format("{:.2f}", subset=["Stack_Value", "EPA_Adv", "YPP_Adv", "PTD_Adv", "EXP_Adv", "DCR_Adv"])
+                    .format("{:.2f}", subset=["Stack_Value", "QB_Corr", "EPA_Adv", "YPP_Adv", "PTD_Adv", "EXP_Adv", "DCR_Adv"])
                     .format("{:.1f}", subset=["Total_Own%"])
                     .format("${:,.0f}", subset=["Total_Salary"])
                     .apply(color_boom_target, axis=1)
@@ -1361,6 +1454,7 @@ def run():
                     .map(stack_rag(stack_df, "Stack_Value"), subset=["Stack_Value"])
                     .map(stack_rag(stack_df, "Total_Ceiling_Adj"), subset=["Total_Ceiling_Adj"])
                     .map(stack_rag(stack_df, "Ceil_Adj_vs_Proj"), subset=["Ceil_Adj_vs_Proj"])
+                    .map(corr_color, subset=["QB_Corr"])
                     .map(stack_rag(stack_df, "Stack_Boom%"), subset=["Stack_Boom%"])
                     .map(stack_rag(stack_df, "Stack_Leverage"), subset=["Stack_Leverage"])
                     .map(stack_rag(stack_df, "Game_Env_Score"), subset=["Game_Env_Score"])
@@ -1542,7 +1636,8 @@ def run():
             opp_ppd_adv = opp_ppd - init_def_ppd
             opp_explosive_adv = opp_explosive - init_def_explosive
             opp_dcr_adv = opp_dcr - init_def_dcr
-        
+            
+
             matchup_data.append({
                 "Game": f"{init_team} @ {opp_team}",
                 "Team": init_team,

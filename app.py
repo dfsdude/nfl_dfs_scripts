@@ -6,6 +6,7 @@ Uses Streamlit's native multi-page app structure.
 
 import streamlit as st
 from utils.config import init_app_config
+from utils.data_manager import DataManager
 
 # Initialize app configuration (must be first Streamlit command)
 init_app_config()
@@ -13,6 +14,9 @@ init_app_config()
 # Sidebar branding
 st.sidebar.title("🏈 DFS Tools Suite")
 st.sidebar.markdown("---")
+
+# Global data uploader (appears on all pages)
+DataManager.show_global_uploader()
 
 st.sidebar.markdown("### About")
 st.sidebar.info(

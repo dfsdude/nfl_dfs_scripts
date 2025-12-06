@@ -631,15 +631,26 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     # Current week salaries
     current_salaries = data['salaries'][data['salaries']['Week'] == current_week].copy()
     
-    # Merge with projections (via ID)
-    # Use left_on/right_on to avoid suffix issues, then drop redundant columns
+    # DEBUG: Check what columns and data exist
+    print(f"  Salaries columns: {current_salaries.columns.tolist()}")
+    print(f"  Salaries shape: {current_salaries.shape}")
+    print(f"  Sample salary IDs: {current_salaries['ID'].head(3).tolist() if 'ID' in current_salaries.columns else 'No ID column'}")
+    print(f"  Sample salary Names: {current_salaries['Name'].head(3).tolist() if 'Name' in current_salaries.columns else 'No Name column'}")
+    
+    print(f"  Projections columns: {data['projections'].columns.tolist()}")
+    print(f"  Projections shape: {data['projections'].shape}")
+    print(f"  Sample projection Ids: {data['projections']['Id'].head(3).tolist() if 'Id' in data['projections'].columns else 'No Id column'}")
+    print(f"  Sample projection Names: {data['projections']['Name'].head(3).tolist() if 'Name' in data['projections'].columns else 'No Name column'}")
+    
+    # Merge with projections by Name instead of ID (IDs don't match across sources)
     current_week_df = current_salaries.merge(
-        data['projections'][['Id', 'Name', 'Position', 'ProjPts', 'ProjOwn']],
-        left_on='ID',
-        right_on='Id',
+        data['projections'][['Name', 'Position', 'ProjPts', 'ProjOwn']],
+        on='Name',
         how='inner',
         suffixes=('_salary', '_proj')
     )
+    
+    print(f"  After merge on Name: {len(current_week_df)} players matched")
     
     # Use projection name/position (more reliable), drop salary versions if they exist
     if 'Name_proj' in current_week_df.columns:
@@ -812,7 +823,7 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
         'Floor_Proj', 'Ceiling_Proj',
         'Sim_P10', 'Sim_P15', 'Sim_P25', 'Sim_P50', 'Sim_P75', 'Sim_P85', 'Sim_P90', 'Sim_P95',
         'Volatility_Index',
-        'hist_games', 'hist_mean_fpts', 'hist_std_fpts', 'effective_std_fpts',
+        'hist_games', 'hist_mean_fpts', 'hist_std_fpts', 'hist_max_fpts', 'effective_std_fpts',
         'matchup_vol_multiplier', 'adj_std'
     ]
     

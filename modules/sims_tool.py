@@ -284,8 +284,58 @@ def run():
                 st.error("Matchup CSV missing 'Total' column")
                 st.stop()
         
-            # Load lineups
-            lineups_df = pd.read_csv(lineups_file)
+            # Load lineups with error handling for DraftKings entries format
+            try:
+                # Try with default settings first
+                lineups_df = pd.read_csv(lineups_file)
+            except pd.errors.ParserError as e:
+                # If parsing fails, try reading DraftKings entries format
+                # This format has instructions/blank rows after the lineup data
+                try:
+                    st.warning("⚠️ CSV parsing issue detected, attempting to parse DraftKings entries format...")
+                    
+                    # Read the file line by line to find where real data ends
+                    import io
+                    lineups_file.seek(0)  # Reset file pointer
+                    content = lineups_file.read().decode('utf-8-sig')
+                    lines = content.split('\n')
+                    
+                    # Find the first data row (after header)
+                    header_line = lines[0]
+                    data_lines = [header_line]
+                    
+                    # Add only lines with Entry ID (non-empty first column that's not blank rows)
+                    for line in lines[1:]:
+                        # Skip empty lines or lines that start with blank values followed by 'Instructions'
+                        if line.strip() and not line.startswith(','):
+                            # Check if line has Entry ID (numeric value in first column)
+                            first_col = line.split(',')[0].strip()
+                            if first_col and first_col.isdigit():
+                                data_lines.append(line)
+                    
+                    # Create CSV from filtered lines
+                    filtered_csv = '\n'.join(data_lines)
+                    lineups_df = pd.read_csv(io.StringIO(filtered_csv))
+                    
+                    # Remove 'Instructions' column if present
+                    if 'Instructions' in lineups_df.columns:
+                        lineups_df = lineups_df.drop(columns=['Instructions'])
+                    
+                    # Remove any unnamed columns (blank column separators)
+                    unnamed_cols = [col for col in lineups_df.columns if 'Unnamed' in str(col)]
+                    if unnamed_cols:
+                        lineups_df = lineups_df.drop(columns=unnamed_cols)
+                    
+                    st.success(f"✅ Successfully parsed DraftKings entries format: {len(lineups_df)} lineups found")
+                    
+                except Exception as e2:
+                    st.error(f"❌ Failed to parse lineups CSV: {str(e2)}")
+                    st.info("💡 **Troubleshooting tips:**\n"
+                           "1. For DraftKings entries files, make sure to use the exported CSV format\n"
+                           "2. Check that player names don't contain unescaped commas\n"
+                           "3. Ensure all rows have the same number of columns\n"
+                           "4. Try opening in Excel and re-saving as CSV (UTF-8)")
+                    st.stop()
         
             # Debug: show actual columns
             st.info(f"Detected columns: {lineups_df.columns.tolist()}")

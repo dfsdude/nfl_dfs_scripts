@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
 import itertools
+from utils.data_manager import DataManager
 
 # st.set_page_config(page_title="Pre-Contest Simulator", layout="wide")
 
@@ -17,22 +18,49 @@ def run():
     to identify which players offer the best ROI and what your optimal exposure levels should be.
     """)
 
-    # --------------------------------------------------------
-    # File Upload Section
-    # --------------------------------------------------------
-    st.sidebar.header("📁 Upload Data Files")
+    # Show data status
+    DataManager.show_tool_data_status("Pre-Contest Simulator")
 
-    projections_file = st.sidebar.file_uploader(
-        "Player Projections",
-        type=['csv'],
-        help="Upload your boom/bust projections file with: name, position, salary, team, opp, proj_adj, ceiling_adj, stddev_adj (or will be calculated), Own%"
-    )
+    # --------------------------------------------------------
+    # File Upload Section (Local overrides if needed)
+    # --------------------------------------------------------
+    st.sidebar.header("📁 Local File Overrides (Optional)")
+    st.sidebar.caption("Override global files for this tool only")
+    
+    with st.sidebar.expander("🔧 Local Files", expanded=False):
+        local_projections = st.file_uploader(
+            "Player Projections (Local)",
+            type=['csv'],
+            help="Upload your boom/bust projections file with: name, position, salary, team, opp, proj_adj, ceiling_adj, stddev_adj (or will be calculated), Own%",
+            key="local_projections"
+        )
 
-    matchup_file = st.sidebar.file_uploader(
-        "Matchup Data (Optional)",
-        type=['csv'],
-        help="Upload Matchup.csv with game environment and team stats (ITT, Total, Spread, EPA, etc.)"
-    )
+        local_matchup = st.file_uploader(
+            "Matchup Data (Local)",
+            type=['csv'],
+            help="Upload Matchup.csv with game environment (ITT, Total, Spread, etc.)",
+            key="local_matchup"
+        )
+
+        local_sharp_offense = st.file_uploader(
+            "Sharp Offense (Local)",
+            type=['csv'],
+            help="Upload Sharp Football offensive metrics (EPA_Play, Explosive Play Rate, etc.)",
+            key="local_sharp_offense"
+        )
+
+        local_sharp_defense = st.file_uploader(
+            "Sharp Defense (Local)",
+            type=['csv'],
+            help="Upload Sharp Football defensive metrics (EPA_Play_Allowed, etc.)",
+            key="local_sharp_defense"
+        )
+    
+    # Use local files if provided, otherwise use global
+    projections_file = local_projections if local_projections else DataManager.get_file('roo_projections')
+    matchup_file = local_matchup if local_matchup else DataManager.get_file('matchups')
+    sharp_offense_file = local_sharp_offense if local_sharp_offense else DataManager.get_file('sharp_offense')
+    sharp_defense_file = local_sharp_defense if local_sharp_defense else DataManager.get_file('sharp_defense')
 
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ Contest Settings")
@@ -159,17 +187,73 @@ def run():
             try:
                 matchup_data = pd.read_csv(matchup_file)
             
-                # Merge team-level matchup data
+                # Team abbreviation to full name mapping (for Sharp Football data)
+                abbrev_to_full = {
+                    'ARI': 'Cardinals', 'ATL': 'Falcons', 'BAL': 'Ravens', 'BUF': 'Bills',
+                    'CAR': 'Panthers', 'CHI': 'Bears', 'CIN': 'Bengals', 'CLE': 'Browns',
+                    'DAL': 'Cowboys', 'DEN': 'Broncos', 'DET': 'Lions', 'GB': 'Packers',
+                    'HOU': 'Texans', 'IND': 'Colts', 'JAX': 'Jaguars', 'KC': 'Chiefs',
+                    'LAC': 'Chargers', 'LAR': 'Rams', 'LV': 'Raiders', 'MIA': 'Dolphins',
+                    'MIN': 'Vikings', 'NE': 'Patriots', 'NO': 'Saints', 'NYG': 'Giants',
+                    'NYJ': 'Jets', 'PHI': 'Eagles', 'PIT': 'Steelers', 'SEA': 'Seahawks',
+                    'SF': '49ers', 'TB': 'Buccaneers', 'TEN': 'Titans', 'WAS': 'Commanders'
+                }
+            
+                # Merge basic matchup data (ITT, Spread, Total, etc.)
+                matchup_cols = ['Init', 'ITT', 'Loc', 'Spread', 'Total']
+                # Only include columns that exist
+                available_matchup_cols = [col for col in matchup_cols if col in matchup_data.columns]
+                
                 projections_df = projections_df.merge(
-                    matchup_data[['Init', 'ITT', 'Loc', 'FavStatus', 'Spread', 'Total', 
-                                 'Init_EPA_Play', 'Init_Yards Per Play', 'Init_Points Per Drive',
-                                 'Opp_EPA_Play_Allowed', 'Opp_Yards Per Play Allowed', 'Opp_Points Per Drive Allowed']],
+                    matchup_data[available_matchup_cols],
                     left_on='team',
                     right_on='Init',
                     how='left'
                 )
             
                 st.success(f"✅ Loaded matchup data for {matchup_data['Init'].nunique()} teams")
+                
+                # Merge Sharp Football metrics if provided
+                if sharp_offense_file:
+                    sharp_offense = pd.read_csv(sharp_offense_file)
+                    projections_df['Team_Full'] = projections_df['team'].map(abbrev_to_full).fillna(projections_df['team'])
+                    
+                    sharp_offense_renamed = sharp_offense.rename(columns={
+                        'Team': 'Team_Full',
+                        'EPA_Play': 'Team_EPA_Play',
+                        'Explosive Play Rate': 'Team_Explosive_Play_Rate',
+                        'Points Per Drive': 'Team_Points_Per_Drive'
+                    })
+                    
+                    projections_df = projections_df.merge(
+                        sharp_offense_renamed[['Team_Full', 'Team_EPA_Play', 'Team_Explosive_Play_Rate', 'Team_Points_Per_Drive']],
+                        on='Team_Full',
+                        how='left'
+                    )
+                    st.success(f"✅ Loaded Sharp Offense metrics")
+                
+                if sharp_defense_file:
+                    sharp_defense = pd.read_csv(sharp_defense_file)
+                    if 'opp' in projections_df.columns:
+                        projections_df['Opp_Full'] = projections_df['opp'].map(abbrev_to_full).fillna(projections_df['opp'])
+                        
+                        sharp_defense_renamed = sharp_defense.rename(columns={
+                            'Team': 'Opp_Full',
+                            'EPA_Play_Allowed': 'Opp_EPA_Play_Allowed',
+                            'Explosive Play Rate Allowed': 'Opp_Explosive_Play_Rate_Allowed',
+                            'Points Per Drive Allowed': 'Opp_Points_Per_Drive_Allowed'
+                        })
+                        
+                        projections_df = projections_df.merge(
+                            sharp_defense_renamed[['Opp_Full', 'Opp_EPA_Play_Allowed', 'Opp_Explosive_Play_Rate_Allowed', 'Opp_Points_Per_Drive_Allowed']],
+                            on='Opp_Full',
+                            how='left'
+                        )
+                        st.success(f"✅ Loaded Sharp Defense metrics")
+                
+                # Drop temporary full name columns
+                projections_df = projections_df.drop(columns=['Team_Full', 'Opp_Full'], errors='ignore')
+                
             except Exception as e:
                 st.warning(f"⚠️ Could not load matchup data: {str(e)}")
     

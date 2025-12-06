@@ -9,7 +9,7 @@ def display_player_table(
     df: pd.DataFrame,
     columns: list = None,
     title: str = None,
-    use_container_width: bool = True
+    width: str = 'stretch'
 ) -> None:
     """
     Display formatted player table with optional title
@@ -18,13 +18,13 @@ def display_player_table(
         df: DataFrame to display
         columns: List of columns to show (None = all columns)
         title: Optional table title
-        use_container_width: Whether to use full container width
+        width: Width mode - 'stretch' for full container width, 'content' for auto
     """
     if title:
         st.subheader(title)
     
     display_df = df[columns] if columns else df
-    st.dataframe(display_df, use_container_width=use_container_width)
+    st.dataframe(display_df, width=width)
 
 def display_styled_table(
     df: pd.DataFrame,
@@ -59,7 +59,7 @@ def display_styled_table(
                     color=style_config.get('color', 'lightblue')
                 )
     
-    st.dataframe(styled_df, use_container_width=True)
+    st.dataframe(styled_df, width='stretch')
 
 def create_comparison_table(
     df1: pd.DataFrame,
