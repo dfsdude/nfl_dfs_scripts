@@ -27,9 +27,36 @@ def run():
 
     st.sidebar.header("📂 Upload Data Files")
 
-    roo_projections_file = st.sidebar.file_uploader("ROO Projections CSV", type=['csv'], key='roo_projections',
-                                                      help="Output from roo_simulator.py with Floor/Ceiling/Median projections")
-    matchup_file = st.sidebar.file_uploader("Matchup CSV", type=['csv'], key='matchup')
+    # Check if data is already loaded globally via DataManager
+    from utils.data_manager import DataManager
+    
+    roo_projections_file = None
+    matchup_file = None
+    
+    # Check for globally loaded data
+    roo_data = DataManager.get_data('roo_projections')
+    matchup_data = DataManager.get_data('matchups')
+    
+    if roo_data is not None:
+        st.sidebar.success("✅ Using globally loaded ROO projections")
+        # Create a file-like object from the dataframe
+        import io
+        roo_projections_file = io.StringIO()
+        roo_data.to_csv(roo_projections_file, index=False)
+        roo_projections_file.seek(0)
+    else:
+        roo_projections_file = st.sidebar.file_uploader("ROO Projections CSV", type=['csv'], key='roo_projections_upload',
+                                                          help="Output from roo_simulator.py with Floor/Ceiling/Median projections")
+    
+    if matchup_data is not None:
+        st.sidebar.success("✅ Using globally loaded matchup data")
+        import io
+        matchup_file = io.StringIO()
+        matchup_data.to_csv(matchup_file, index=False)
+        matchup_file.seek(0)
+    else:
+        matchup_file = st.sidebar.file_uploader("Matchup CSV", type=['csv'], key='matchup_upload')
+    
     lineups_file = st.sidebar.file_uploader("Lineups CSV", type=['csv'], key='lineups')
 
     st.sidebar.markdown("**Optional: Enhanced Metrics**")
@@ -68,6 +95,7 @@ def run():
     payout_structure = {}
     payout_presets = {
         "NFL $40K Front Four (11890 entries, $3)": "1-1:4000\n2-2:2000\n3-3:1500\n4-4:1000\n5-5:750\n6-6:600\n7-8:500\n9-10:400\n11-12:300\n13-14:250\n15-16:200\n17-21:150\n22-26:100\n27-31:75\n32-36:60\n37-46:50\n47-56:40\n57-71:30\n72-96:25\n97-151:20\n152-291:15\n292-661:10\n662-1396:8\n1397-3091:6",
+        "NFL $175K Fair Catch (17156 entries, $12)": "1-1:15000\n2-2:10000\n3-3:7500\n4-4:5000\n5-5:4000\n6-6:3000\n7-8:2000\n9-10:1500\n11-15:1000\n16-20:700\n21-25:500\n26-30:400\n31-35:300\n36-45:200\n46-55:150\n56-75:125\n76-100:100\n101-150:75\n151-250:50\n251-450:40\n451-750:35\n751-1200:30\n1201-1900:25\n1901-2910:20\n2911-4135:18",
         "Flat GPP (2972 entries, $3)": "1-1:1000\n2-2:500\n3-3:300\n4-4:200\n5-5:150\n6-7:125\n8-10:100\n11-13:75\n14-16:60\n17-20:50\n21-25:40\n26-30:30\n31-45:25\n46-75:20\n76-125:15\n126-230:10\n231-410:8\n411-765:6",
         "Top-Heavy GPP (83234 entries, $5)": "1-1:50000\n2-2:20000\n3-3:10000\n4-4:7500\n5-5:5000\n6-6:3000\n7-8:2000\n9-10:1500\n11-15:1000\n16-20:750\n21-30:500\n31-50:300\n51-70:200\n71-100:100\n101-150:70\n151-225:50\n226-350:40\n351-550:30\n551-1050:25\n1051-1750:20\n1751-3150:15\n3151-6000:12\n6001-10080:10\n10081-20080:8"
     }
@@ -90,7 +118,7 @@ def run():
 
     elif payout_type == "Flat GPP":
         # Preset flat payout structure
-        preset_choice = st.sidebar.selectbox("Select Preset", ["NFL $40K Front Four (11890 entries, $3)", "Flat GPP (2972 entries, $3)", "Custom"])
+        preset_choice = st.sidebar.selectbox("Select Preset", ["NFL $40K Front Four (11890 entries, $3)", "NFL $175K Fair Catch (17156 entries, $12)", "Flat GPP (2972 entries, $3)", "Custom"])
     
         if preset_choice == "Custom":
             payout_input = st.sidebar.text_area(
@@ -218,11 +246,17 @@ def run():
                 'OWS_Median_Proj': 'median_proj',  # ROO median projection
                 'Ceiling_Proj': 'ceiling_proj',     # ROO ceiling (P85)
                 'Floor_Proj': 'floor_proj',         # ROO floor (P15)
-                'Volatility_Index': 'var_dk',       # ROO volatility measure
-                'stddev_adj': 'var_dk',             # Alternative: use stddev_adj if Volatility_Index missing
+                'OWS_Proj_Own': 'Proj_Own',         # ROO ownership column
                 'Own%': 'Proj_Own',                 # Ownership percentage
                 'dk_ownership': 'Proj_Own',         # Alternative ownership column
             }
+            
+            # Handle volatility columns with priority (use first available)
+            volatility_cols = ['effective_std_fpts', 'adj_std', 'hist_std_fpts', 'Volatility_Index', 'stddev_adj']
+            for vol_col in volatility_cols:
+                if vol_col in players_df.columns and 'var_dk' not in players_df.columns:
+                    column_mapping[vol_col] = 'var_dk'
+                    break
             
             # Apply mapping (only rename columns that exist)
             existing_mappings = {old: new for old, new in column_mapping.items() if old in players_df.columns}
@@ -288,6 +322,25 @@ def run():
             try:
                 # Try with default settings first
                 lineups_df = pd.read_csv(lineups_file)
+                
+                # Filter out invalid rows (DraftKings format has instructions/blank rows)
+                # Valid lineups have numeric Entry ID in first column
+                if 'Entry ID' in lineups_df.columns:
+                    # Keep only rows with valid Entry IDs (non-null and can be converted to numeric)
+                    lineups_df = lineups_df[lineups_df['Entry ID'].notna()].copy()
+                    # Try to convert to numeric and drop rows that fail
+                    lineups_df['Entry ID'] = pd.to_numeric(lineups_df['Entry ID'], errors='coerce')
+                    lineups_df = lineups_df[lineups_df['Entry ID'].notna()].copy()
+                
+                # Remove 'Instructions' column if present (DraftKings format)
+                if 'Instructions' in lineups_df.columns:
+                    lineups_df = lineups_df.drop(columns=['Instructions'])
+                
+                # Remove any unnamed columns (blank column separators in DK format)
+                unnamed_cols = [col for col in lineups_df.columns if 'Unnamed' in str(col)]
+                if unnamed_cols:
+                    lineups_df = lineups_df.drop(columns=unnamed_cols)
+                    
             except pd.errors.ParserError as e:
                 # If parsing fails, try reading DraftKings entries format
                 # This format has instructions/blank rows after the lineup data
@@ -385,7 +438,7 @@ def run():
                 team_defense_df = pd.read_csv(team_defense_file)
                 st.success(f"✅ Loaded team defense stats for {len(team_defense_df)} teams")
         
-            st.success(f"✅ Loaded {len(players_df)} players, {len(weekly_stats_df)} historical records, {len(matchup_df)} matchups, {len(lineups_df)} lineups")
+            st.success(f"✅ Loaded {len(players_df)} players, {len(matchup_df)} matchups, {len(lineups_df)} lineups")
         
             # ===========================
             # Section 2: Player Mapping
@@ -402,46 +455,35 @@ def run():
             st.info(f"Created player ID mapping for {n_players} players")
         
             with st.spinner("Building player history and matchup mapping..."):
-                # Build player_hist dict with recency-weighted metrics
-                lambda_decay = 0.15
-                max_week = weekly_stats_df['Week'].max()
-            
+                # ROO projections already include historical volatility analysis
+                # Create simplified player_hist dict from ROO data
                 player_hist = {}
             
-                for player_name in players_df['Name'].unique():
-                    player_stats = weekly_stats_df[weekly_stats_df['Name'] == player_name].copy()
-                
-                    if len(player_stats) >= 3:  # Need at least 3 games for meaningful history
-                        # Calculate recency weights
-                        player_stats['weight'] = np.exp(-lambda_decay * (max_week - player_stats['Week']))
+                for _, row in players_df.iterrows():
+                    player_name = row['Name']
                     
-                        scores = player_stats['DK Points'].values
-                        weights = player_stats['weight'].values
-                    
-                        # Normalize weights
-                        weights = weights / weights.sum()
-                    
-                        # Weighted statistics
-                        weighted_mean = np.sum(scores * weights)
-                        weighted_var = np.sum(weights * (scores - weighted_mean)**2)
-                        weighted_std = np.sqrt(weighted_var)
-                    
-                        # 90th percentile (simple: sort and take weighted position)
-                        sorted_idx = np.argsort(scores)
-                        sorted_scores = scores[sorted_idx]
-                        sorted_weights = weights[sorted_idx]
-                        cumsum = np.cumsum(sorted_weights)
-                        p90_idx = np.searchsorted(cumsum, 0.90)
-                        p90 = sorted_scores[min(p90_idx, len(sorted_scores)-1)]
-                    
+                    # Use ROO metrics - all should exist after column mapping
+                    try:
+                        mean_proj = float(row['median_proj'])
+                        ceiling = float(row['ceiling_proj'])
+                        floor = float(row['floor_proj'])
+                        
+                        # Get std dev (already mapped to var_dk)
+                        if 'var_dk' in row.index and pd.notna(row['var_dk']):
+                            std_dev = float(row['var_dk'])
+                        else:
+                            # Fallback: estimate from range (ceiling - floor should span ~4 std devs)
+                            std_dev = (ceiling - floor) / 4.0
+                        
                         player_hist[player_name] = {
-                            'scores': scores,
-                            'weights': weights,
-                            'mean': weighted_mean,
-                            'std': weighted_std,
-                            'p90': p90,
-                            'n_games': len(scores)
+                            'mean': mean_proj,
+                            'std': std_dev,
+                            'p90': ceiling,
+                            'n_games': 8  # Assume sufficient history (ROO already validated this)
                         }
+                    except (KeyError, ValueError, TypeError) as e:
+                        st.warning(f"⚠️ Skipping player {player_name}: missing required projection data ({e})")
+                        continue
             
                 # Build team_env dict from matchup data
                 team_env = {}
@@ -538,51 +580,37 @@ def run():
             # ===========================
         
             def sample_player_score(player_name, player_row, player_hist, rng):
-                """Sample a player's score using empirical distribution with projection scaling"""
+                """Sample a player's score using lognormal distribution from ROO projections"""
             
-                median_proj = player_row['median_proj']
-            
+                median_proj = float(player_row['median_proj'])
+                
+                # Use ROO-derived statistics (already computed in player_hist)
                 if player_name in player_hist:
                     hist = player_hist[player_name]
-                
-                    # Empirical sampling with recency weights
-                    raw_score = rng.choice(hist['scores'], p=hist['weights'])
-                
-                    # Scale to projection
-                    scale = median_proj / max(hist['mean'], 0.1)
-                    base_score = raw_score * scale
-                
-                    return base_score
-            
+                    mean = hist['mean']  # Already float from dict construction
+                    std = hist['std']     # Already float from dict construction
                 else:
-                    # Parametric fallback using var_dk or position-based variance
-                    if 'var_dk' in player_row and pd.notna(player_row['var_dk']) and player_row['var_dk'] > 0:
-                        std_dev = np.sqrt(player_row['var_dk'])
+                    # Fallback if not in hist (shouldn't happen with ROO data)
+                    mean = median_proj
+                    if 'var_dk' in player_row.index and pd.notna(player_row['var_dk']):
+                        std = float(player_row['var_dk'])
                     else:
-                        # Position-based variance estimation
-                        ceiling = player_row['ceiling_proj']
-                        position = player_row['Position']
+                        std = median_proj * 0.5
+                
+                # Use lognormal distribution (better for DFS scoring which is right-skewed)
+                if std > 0 and mean > 0:
+                    # Calculate lognormal parameters
+                    variance = std ** 2
+                    mu = np.log(mean ** 2 / np.sqrt(variance + mean ** 2))
+                    sigma = np.sqrt(np.log(1 + variance / (mean ** 2)))
                     
-                        # Try ceiling-based estimate first
-                        if ceiling > median_proj and (ceiling - median_proj) < median_proj * 2:
-                            std_dev = (ceiling - median_proj) / 1.65
-                        else:
-                            # Position multipliers (variance as % of projection)
-                            pos_mult = {
-                                'QB': 0.45,
-                                'RB': 0.60,
-                                'WR': 0.65,
-                                'TE': 0.55,
-                                'DST': 0.70
-                            }
-                            mult = pos_mult.get(position, 0.60)
-                            std_dev = median_proj * mult
+                    # Sample from lognormal
+                    base_score = rng.lognormal(mu, sigma)
+                else:
+                    # Degenerate case: use normal with floor at 0
+                    base_score = max(0, rng.normal(mean, abs(std) + 0.1))
                 
-                    # Sample from normal distribution
-                    base_score = rng.normal(median_proj, std_dev)
-                    base_score = max(0, base_score)  # No negative scores
-                
-                    return base_score
+                return base_score
         
             def apply_team_adjustments(player_row, base_score, team_env):
                 """Apply position-specific adjustments based on team offense/defense stats"""
@@ -863,6 +891,54 @@ def run():
             
                 return lineups
         
+            def build_env_state(team_env, matchup_df, total_sd, spread_sd, alpha_matchup, rng):
+                """Build game environment state for a single simulation"""
+                env_state = {}
+                
+                # Group matchups by game
+                games = {}
+                for _, row in matchup_df.iterrows():
+                    team = row['Team']
+                    opp = row['Opp']
+                    game_key = tuple(sorted([team, opp]))
+                    
+                    if game_key not in games:
+                        games[game_key] = {
+                            'teams': list(game_key),
+                            'total': row.get('Total', 45.0),
+                            'spread': row.get('Spread', 0.0)
+                        }
+                
+                # Sample game environment for each game
+                for game_id, game_info in games.items():
+                    # Sample actual total (with variance)
+                    actual_total = rng.normal(game_info['total'], total_sd)
+                    actual_total = max(20, actual_total)  # Floor at 20 points
+                    
+                    # Sample actual spread (with variance)
+                    actual_spread = rng.normal(game_info['spread'], spread_sd)
+                    
+                    # Distribute scoring between teams based on spread
+                    # Negative spread means team1 is favored
+                    team1_expected = (actual_total / 2) - (actual_spread / 2)
+                    team2_expected = (actual_total / 2) + (actual_spread / 2)
+                    
+                    # Convert to multipliers (1.0 = expected scoring)
+                    baseline_total = game_info['total']
+                    team1_mult = (team1_expected / (baseline_total / 2)) if baseline_total > 0 else 1.0
+                    team2_mult = (team2_expected / (baseline_total / 2)) if baseline_total > 0 else 1.0
+                    
+                    env_state[game_id] = {
+                        'actual_total': actual_total,
+                        'spread': actual_spread,
+                        'team_scoring_mult': {
+                            game_info['teams'][0]: team1_mult,
+                            game_info['teams'][1]: team2_mult
+                        }
+                    }
+                
+                return env_state
+        
             # ===========================
             # Section 7: Simulation Loop
             # ===========================
@@ -920,6 +996,10 @@ def run():
                     # Convert lineups to NumPy integer arrays for vectorized operations
                     field_lineups_ids = np.array([[player_to_id[p] for p in lineup] for lineup in field_lineups], dtype=np.int32)
                     user_lineups_ids = np.array([[player_to_id[p] for p in lineup] for lineup in user_lineups], dtype=np.int32)
+                    
+                    # Ensure user_lineups_ids is 2D even with single lineup
+                    if user_lineups_ids.ndim == 1:
+                        user_lineups_ids = user_lineups_ids.reshape(1, -1)
                 
                     # Pre-build correlation lookups (cache these outside simulation loop)
                     qb_to_pass_catchers = {}  # QB -> list of (pass_catcher_id, median_proj) tuples

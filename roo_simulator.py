@@ -139,9 +139,11 @@ def build_player_volatility(weekly_stats: pd.DataFrame, weekly_dst_stats: pd.Dat
     print(f"    Sample players: {player_agg['Player'].head(5).tolist()}")
     
     # Process DST (defense/special teams)
+    # Use ALL available weeks for DST (not just recent lookback) since week 1
     dst_max_week = weekly_dst_stats['Week'].max()
-    dst_lookback = dst_max_week - ROOConfig.LOOKBACK_WEEKS
-    recent_dst = weekly_dst_stats[weekly_dst_stats['Week'] > dst_lookback].copy()
+    recent_dst = weekly_dst_stats[weekly_dst_stats['Week'] >= 1].copy()
+    
+    print(f"  Using weeks 1 to {dst_max_week} ({dst_max_week} weeks) for DST volatility")
     
     # Standardize DST names using mapping
     recent_dst['Player'] = recent_dst['Player'].map(name_map).fillna(recent_dst['Player'])
@@ -631,6 +633,30 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     # Current week salaries
     current_salaries = data['salaries'][data['salaries']['Week'] == current_week].copy()
     
+    # Trim whitespace from Name column (DST often has trailing spaces)
+    current_salaries['Name'] = current_salaries['Name'].str.strip()
+    
+    # Standardize DST names in projections to match salary file format
+    # Projections use "Denver Broncos", salaries use "Broncos"
+    dst_name_to_short = {
+        'Arizona Cardinals': 'Cardinals', 'Atlanta Falcons': 'Falcons', 'Baltimore Ravens': 'Ravens',
+        'Buffalo Bills': 'Bills', 'Carolina Panthers': 'Panthers', 'Chicago Bears': 'Bears',
+        'Cincinnati Bengals': 'Bengals', 'Cleveland Browns': 'Browns', 'Dallas Cowboys': 'Cowboys',
+        'Denver Broncos': 'Broncos', 'Detroit Lions': 'Lions', 'Green Bay Packers': 'Packers',
+        'Houston Texans': 'Texans', 'Indianapolis Colts': 'Colts', 'Jacksonville Jaguars': 'Jaguars',
+        'Kansas City Chiefs': 'Chiefs', 'Las Vegas Raiders': 'Raiders', 'Los Angeles Chargers': 'Chargers',
+        'Los Angeles Rams': 'Rams', 'Miami Dolphins': 'Dolphins', 'Minnesota Vikings': 'Vikings',
+        'New England Patriots': 'Patriots', 'New Orleans Saints': 'Saints', 'New York Giants': 'Giants',
+        'New York Jets': 'Jets', 'Philadelphia Eagles': 'Eagles', 'Pittsburgh Steelers': 'Steelers',
+        'San Francisco 49ers': '49ers', 'Seattle Seahawks': 'Seahawks', 'Tampa Bay Buccaneers': 'Buccaneers',
+        'Tennessee Titans': 'Titans', 'Washington Commanders': 'Commanders'
+    }
+    
+    # Apply to projections data
+    projections_normalized = data['projections'].copy()
+    dst_mask_proj = projections_normalized['Position'] == 'DST'
+    projections_normalized.loc[dst_mask_proj, 'Name'] = projections_normalized.loc[dst_mask_proj, 'Name'].map(dst_name_to_short).fillna(projections_normalized.loc[dst_mask_proj, 'Name'])
+    
     # DEBUG: Check what columns and data exist
     print(f"  Salaries columns: {current_salaries.columns.tolist()}")
     print(f"  Salaries shape: {current_salaries.shape}")
@@ -643,10 +669,11 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     print(f"  Sample projection Names: {data['projections']['Name'].head(3).tolist() if 'Name' in data['projections'].columns else 'No Name column'}")
     
     # Merge with projections by Name instead of ID (IDs don't match across sources)
+    # Use 'left' join to keep all salary file players (including DST if not in projections)
     current_week_df = current_salaries.merge(
-        data['projections'][['Name', 'Position', 'ProjPts', 'ProjOwn']],
+        projections_normalized[['Name', 'Position', 'ProjPts', 'ProjOwn']],
         on='Name',
-        how='inner',
+        how='left',
         suffixes=('_salary', '_proj')
     )
     
@@ -765,11 +792,24 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
         if col in current_week_df.columns:
             current_week_df[col] = current_week_df[col].fillna(0)
     
+    # Normalize DST position names BEFORE filtering (DraftKings uses 'D', we use 'DST')
+    current_week_df['Position'] = current_week_df['Position'].replace({'D': 'DST'})
+    
+    # DST Player names should now match between projections and salaries (both use short form like "Broncos")
+    # But we still need to ensure they match the Weekly_DST_Stats format for volatility merge
+    # Weekly_DST_Stats also uses short names like "Broncos", so we're good
+    
+    # Fill missing projections for DST with league average (9 points, 2% ownership)
+    missing_proj = current_week_df['OWS_Median_Proj'].isna()
+    dst_missing = (current_week_df['Position'] == 'DST') & missing_proj
+    
+    if dst_missing.sum() > 0:
+        print(f"  ⚠️  {dst_missing.sum()} DST missing projections - using default values (9 pts, 2% own)")
+        current_week_df.loc[dst_missing, 'OWS_Median_Proj'] = 9.0
+        current_week_df.loc[dst_missing, 'OWS_Proj_Own'] = 2.0
+    
     # Filter to players with projections > 0
     current_week_df = current_week_df[current_week_df['OWS_Median_Proj'] > 0].copy()
-    
-    # Normalize DST position names (DraftKings uses 'D', we use 'DST')
-    current_week_df['Position'] = current_week_df['Position'].replace({'D': 'DST'})
     
     dst_count = (current_week_df['Position'] == 'DST').sum()
     print(f"✓ Built slate with {len(current_week_df)} players (including {dst_count} DST)")
