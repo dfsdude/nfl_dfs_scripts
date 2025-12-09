@@ -24,11 +24,36 @@ if __name__ == "__main__":
 **Key Features**:
 - Game environment scoring with pace metrics (ITT, total points)
 - PROE (Pass Rate Over Expected) integration for game script analysis
+- **Game Script Projections**: Blowout probability and position-specific impacts
 - QB + bring-back combinations (WR/TE/RB correlations)
 - Boom/Bust probability calculations (ceiling vs projection)
-- Player filtering by position, salary, ownership
+- Leverage scoring (Boom% - Ownership%)
+- Player filtering by position, salary, ownership, leverage, game script
 - Sharp Football metrics integration (EPA, Explosive Play Rate, PPD)
 - Correlation model using historical weekly performance
+
+**Game Script Analysis**:
+- **Blowout Probability**: Normal distribution (std dev ~13.5 points) calculates likelihood of 14+ point margin
+- **Script Categories**:
+  - 🔥 Blowout (Fav): Spread >7, run-heavy game script expected
+  - ❄️ Blowout (Dog): Spread <-7, garbage time passing expected
+  - ⚡ Shootout: Total ≥50, high-volume passing game
+  - ⚖️ Competitive: Close game, balanced approach
+  - 🛡️ Low-Scoring: Total <44, defensive battle
+- **Position Impacts** (multipliers applied to ceiling):
+  - RB: +20% as favorite (run clock), -15% as underdog
+  - QB: +15% in shootouts, +10% as underdog (garbage time)
+  - WR: +12% in shootouts, +8% as underdog
+  - TE: +8% in shootouts, +5% competitive
+  - DST: +25% as underdog (sacks/turnovers), +15% low-scoring
+- **Implementation**: Uses existing Matchup.csv (Spread, Total, ITT) - no new data required
+
+**Leverage Enhancements**:
+- Leverage filter slider (min-max range)
+- Sort by leverage checkbox
+- Leverage categories: 🔥 High (≥10%), ⚡ Medium (5-10%), ✓ Low (0-5%), ⚠️ Negative (<0%)
+- Color-coded categories and insights summary
+- Multi-criteria filtering (Position + Salary + Ownership + Leverage + Game Script)
 
 **Correlation Model**:
 - Uses `weekly_stats.csv` to identify player roles (WR1, WR2, TE1, RB1)
@@ -40,8 +65,10 @@ if __name__ == "__main__":
 - Loads ROO projections as primary data source
 - Maps columns: `hist_max_fpts` → `max_dk`, `hist_mean_fpts` → `avg_dk`
 - Calculates `hits_4x` from historical games (4x salary value threshold)
+- DST hits_4x uses `Weekly_DST_Stats.csv` (position-aware lookup)
 - Merges matchup data, PROE, Sharp metrics
 - Generates weighted opportunity and concentration scores
+- scipy.stats for game script probability calculations
 
 ### `sims_tool.py`
 **Purpose**: Full-slate lineup simulation against field competition
