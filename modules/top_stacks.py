@@ -56,10 +56,11 @@ def calculate_game_script(players_df):
         itt = row.get('implied_total', 0)
         
         # Blowout: Large spread (>7 pts)
+        # Note: Negative spread = favorite, Positive spread = underdog
         if spread > 7:
-            if row.get('spread', 0) > 0:  # Favorite
+            if row.get('spread', 0) < 0:  # Negative spread = Favorite
                 return "🔥 Blowout (Fav)"
-            else:  # Underdog
+            else:  # Positive spread = Underdog
                 return "❄️ Blowout (Dog)"
         
         # Shootout: High total (50+ points)
