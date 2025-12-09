@@ -867,14 +867,44 @@ def run():
         pool_targets = DFSConfig.POOL_TARGETS = DFSConfig.POOL_TARGETS
     
         # Quick filter option
-        col_filter1, col_filter2, col_filter3 = st.columns([1, 1, 2])
+        col_filter1, col_filter2, col_filter3, col_filter4 = st.columns([1, 1, 1.5, 1.5])
         with col_filter1:
             positions = sorted(df_filtered["position"].unique())
             pos_filter = st.selectbox("Position:", ["All"] + positions)
         with col_filter2:
             show_all = st.checkbox("📋 Show All", help="View all players without any filter constraints")
+        with col_filter3:
+            # Salary range filter
+            min_salary = int(df_filtered["salary"].min())
+            max_salary = int(df_filtered["salary"].max())
+            salary_range = st.slider(
+                "💰 Salary Range",
+                min_value=min_salary,
+                max_value=max_salary,
+                value=(min_salary, max_salary),
+                step=100,
+                help="Filter players by salary range"
+            )
+        with col_filter4:
+            # Ownership range filter
+            min_own = 0.0
+            max_own = float(df_filtered["dk_ownership"].max() * 100)
+            own_range = st.slider(
+                "👥 Ownership %",
+                min_value=min_own,
+                max_value=max_own,
+                value=(min_own, max_own),
+                step=0.5,
+                help="Filter players by projected ownership percentage"
+            )
 
         df_pos = df_filtered if pos_filter == "All" else df_filtered[df_filtered["position"] == pos_filter]
+        
+        # Apply salary filter
+        df_pos = df_pos[(df_pos["salary"] >= salary_range[0]) & (df_pos["salary"] <= salary_range[1])]
+        
+        # Apply ownership filter
+        df_pos = df_pos[(df_pos["dk_ownership"] * 100 >= own_range[0]) & (df_pos["dk_ownership"] * 100 <= own_range[1])]
 
         display_df = df_pos.copy()
     

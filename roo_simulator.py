@@ -113,21 +113,20 @@ def build_player_volatility(weekly_stats: pd.DataFrame, weekly_dst_stats: pd.Dat
     mapped_count = len(name_map)
     print(f"  Loaded {mapped_count} name mappings from Player_Mapping.csv")
     
-    # Process offensive players
+    # Process offensive players - USE FULL SEASON for all metrics
     max_week = weekly_stats['Week'].max()
-    lookback_cutoff = max_week - ROOConfig.LOOKBACK_WEEKS
-    recent_stats = weekly_stats[weekly_stats['Week'] > lookback_cutoff].copy()
     
-    # Standardize player names
-    recent_stats['Player'] = recent_stats['Player'].map(name_map).fillna(recent_stats['Player'])
+    # Use FULL SEASON data for consistency
+    full_season_stats = weekly_stats.copy()
+    full_season_stats['Player'] = full_season_stats['Player'].map(name_map).fillna(full_season_stats['Player'])
     
-    unmapped_players = recent_stats[~recent_stats['Player'].isin(name_map.values())]['Player'].nunique()
+    unmapped_players = full_season_stats[~full_season_stats['Player'].isin(name_map.values())]['Player'].nunique()
     print(f"  {unmapped_players} unique players in Weekly_Stats not in mapping (using original names)")
     
-    print(f"  Using weeks {lookback_cutoff + 1} to {max_week} ({ROOConfig.LOOKBACK_WEEKS} weeks)")
+    print(f"  Using FULL SEASON data (all weeks) for offensive player volatility")
     
-    # Player-level aggregation
-    player_agg = recent_stats.groupby(['Player', 'Team', 'Position']).agg({
+    # Player-level aggregation from FULL SEASON
+    player_agg = full_season_stats.groupby(['Player', 'Team', 'Position']).agg({
         'DK_Points': ['count', 'mean', 'std', 'min', 'max']
     }).reset_index()
     
@@ -136,6 +135,7 @@ def build_player_volatility(weekly_stats: pd.DataFrame, weekly_dst_stats: pd.Dat
                           'hist_mean_fpts', 'hist_std_fpts', 'hist_min_fpts', 'hist_max_fpts']
     
     print(f"  Aggregated stats for {len(player_agg)} unique players from Weekly_Stats")
+    print(f"    Using FULL SEASON data for all metrics (mean, std, min, max)")
     print(f"    Sample players: {player_agg['Player'].head(5).tolist()}")
     
     # Process DST (defense/special teams)
@@ -149,6 +149,7 @@ def build_player_volatility(weekly_stats: pd.DataFrame, weekly_dst_stats: pd.Dat
     recent_dst['Player'] = recent_dst['Player'].map(name_map).fillna(recent_dst['Player'])
     
     # DST aggregation (Player column is team name, e.g., "49ers")
+    # Note: DST already uses full season, so max is accurate
     dst_agg = recent_dst.groupby(['Player', 'Team']).agg({
         'DK_Points': ['count', 'mean', 'std', 'min', 'max']
     }).reset_index()
@@ -165,9 +166,9 @@ def build_player_volatility(weekly_stats: pd.DataFrame, weekly_dst_stats: pd.Dat
         all_players['hist_mean_fpts'] * 0.5
     )
     
-    # Position-level aggregation (for players with low sample)
+    # Position-level aggregation (for players with low sample) - USE FULL SEASON
     position_agg = pd.concat([
-        recent_stats.groupby('Position').agg({'DK_Points': ['mean', 'std']}).reset_index(),
+        full_season_stats.groupby('Position').agg({'DK_Points': ['mean', 'std']}).reset_index(),
         recent_dst.assign(Position='DST').groupby('Position').agg({'DK_Points': ['mean', 'std']}).reset_index()
     ], ignore_index=True)
     position_agg.columns = ['Position', 'pos_mean_fpts', 'pos_std_fpts']
