@@ -12,10 +12,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Multiple projection source support
 - Lineup builder with in-app optimizer
 - Bankroll management tools
+- RB-QB correlation modeling
+- Negative correlation warnings (WR1 vs WR2)
 
 ---
 
-## [2025-12-08]
+## [2025-12-08] - Game Script Projections
+
+### Added
+- **Top Stacks - Game Script Analysis**:
+  - Game script calculation based on spread, total, and implied team total
+  - Blowout probability using normal distribution (std dev ~13.5 points)
+  - 5 game script categories:
+    - 🔥 Blowout (Fav): Large favorite (spread >7)
+    - ❄️ Blowout (Dog): Large underdog (spread <-7)
+    - ⚡ Shootout: High-scoring game (total ≥50)
+    - ⚖️ Competitive: Close game (spread -7 to +7, total 44-50)
+    - 🛡️ Low-Scoring: Defensive battle (total <44)
+  - Position-specific script impact multipliers:
+    - RB: +20% as favorite, -15% as underdog
+    - QB: +15% in shootouts, +10% as underdog
+    - WR: +12% in shootouts, +8% as underdog
+    - TE: +8% in shootouts, +5% competitive
+    - DST: +25% as underdog, +15% low-scoring
+  - New columns in boom/bust view:
+    - `Script_Cat`: Game script category with emoji
+    - `Blowout_Prob%`: Probability of 14+ point margin
+    - `Script_Impact`: Position-specific multiplier (0.80-1.25)
+  - Game script filter (multi-select by category)
+  - Color-coded game scripts (purple=shootout, green=fav, blue=dog, yellow=competitive, gray=low-scoring)
+  - Script impact color gradient (green=positive, yellow=neutral, red=negative)
+
+### Changed
+- Player boom/bust analysis now factors game environment into ceiling calculations
+- Added scipy.stats dependency for normal distribution calculations
+
+---
+
+## [2025-12-08] - Leverage Enhancements & DST Fixes
+
+### Added
+- **Top Stacks - Leverage Enhancements**:
+  - Leverage filter slider (filter by leverage % range)
+  - "Sort by Leverage" checkbox for quick identification of high-leverage plays
+  - Leverage category column (`Lev_Cat`) with visual labels: 🔥 High, ⚡ Medium, ✓ Low, ⚠️ Negative
+  - Color-coded leverage categories (green/yellow/orange/red)
+  - Leverage insights summary metrics (counts by category)
+  - Leverage guide caption (>10% = High, 5-10% = Medium, <5% = Low)
+  - Multi-criteria filtering (Position + Salary + Ownership + Leverage)
+
+- **Top Stacks - DST hits_4x Fix**:
+  - Load `Weekly_DST_Stats.csv` for DST historical data
+  - Calculate `hits_4x` from DST stats (previously showing 0 for all DST)
+  - Position-aware lookup (DST uses Weekly_DST_Stats, others use Weekly_Stats)
+
+### Changed
+- Enhanced boom/bust view with comprehensive leverage filtering and sorting
+
+---
+
+## [2025-12-08] - Earlier
 
 ### Added
 - `claude.md` files in all subdirectories for AI context

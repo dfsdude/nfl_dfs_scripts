@@ -12,8 +12,28 @@
 ### Top Stacks Tool
 - [ ] Add RB correlation to QB (rushing TDs in high-scoring games)
 - [ ] Implement negative correlation warnings (WR1 vs WR2 cannibalization)
-- [ ] Add game script projections (blowout likelihood)
-- [ ] Include leverage score (boom% - ownership%)
+- [x] **Add game script projections (blowout likelihood)**
+  - **Implementation approach**:
+    - Use existing data: Spread, Total, ITT (Implied Team Total)
+    - Calculate blowout probability using spread distribution (std dev ~13.5 points)
+    - Identify games with >70% chance of 14+ point margin
+  - **Game script categories**:
+    - 🔥 Blowout (Fav) - Favorite in lopsided game
+    - ❄️ Blowout (Dog) - Underdog in lopsided game
+    - ⚡ Shootout - High-scoring game (total ≥50)
+    - ⚖️ Competitive - Close game, balanced
+    - 🛡️ Low-Scoring - Defensive battle (total <44)
+  - **Player impacts**:
+    - Favorites in blowouts: RB +20%, WR -5% (run clock)
+    - Underdogs in blowouts: QB +10%, WR +8% (garbage time), DST +25%
+    - Shootouts: QB +15%, WR +12%, TE +8%
+    - Low-scoring: DST +15%, RB +5%, QB -10%
+  - **Columns added**:
+    - `Script_Cat`: Game script category with emoji
+    - `Script_Impact`: Position-specific multiplier (0.80-1.25)
+    - `Blowout_Prob%`: Probability of 14+ point margin
+  - **No new data required** - uses existing Matchup.csv (Spread, Total, ITT)
+- [x] Include leverage score enhancements (boom% - ownership%)
 - [ ] Add stack optimizer (auto-generate optimal QB+bring-back combos)
 
 ### Lineup Simulator
@@ -107,6 +127,8 @@
 - [x] Correlation model (QB-WR, WR-WR)
 - [x] Game environment simulation
 - [x] Contest-specific payout structures
+- [x] DST hits_4x calculation from Weekly_DST_Stats
+- [x] Leverage score enhancements (filter, sort, categories, insights)
 
 ## Notes
 

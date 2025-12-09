@@ -5,6 +5,7 @@ import math
 import itertools
 import os
 from pathlib import Path
+from scipy import stats
 
 # Import correlation module
 try:
@@ -20,6 +21,120 @@ try:
     CORRELATION_AVAILABLE = True
 except ImportError:
     CORRELATION_AVAILABLE = False
+
+
+# --------------------------------------------------------
+# Game Script Analysis Functions
+# --------------------------------------------------------
+def calculate_game_script(players_df):
+    """
+    Calculate game script projections based on spread, total, and implied team total.
+    
+    Game Script Categories:
+    - Blowout: High probability of lopsided game (spread magnitude > 7)
+    - Competitive: Close game expected (spread magnitude <= 7, total < 50)
+    - Shootout: High-scoring affair (total >= 50)
+    - Low-Scoring: Defensive struggle (total < 44, spread close)
+    
+    Returns dataframe with added columns:
+    - script_cat: Game script category
+    - blowout_prob: Probability of 14+ point margin
+    - script_impact: Position-specific fantasy impact multiplier
+    """
+    df = players_df.copy()
+    
+    # Calculate blowout probability (spread distribution, std dev ~13.5 points)
+    # Probability that final margin exceeds 14 points (2 possession game)
+    df['blowout_prob'] = df['spread'].apply(lambda s: 
+        1 - stats.norm.cdf(14, loc=abs(s), scale=13.5) if pd.notna(s) else 0
+    )
+    
+    # Determine game script category
+    def categorize_script(row):
+        spread = abs(row.get('spread', 0))
+        total = row.get('game_total', 0)
+        itt = row.get('implied_total', 0)
+        
+        # Blowout: Large spread (>7 pts)
+        if spread > 7:
+            if row.get('spread', 0) > 0:  # Favorite
+                return "🔥 Blowout (Fav)"
+            else:  # Underdog
+                return "❄️ Blowout (Dog)"
+        
+        # Shootout: High total (50+ points)
+        elif total >= 50:
+            return "⚡ Shootout"
+        
+        # Low-Scoring: Low total (<44 points)
+        elif total < 44:
+            return "🛡️ Low-Scoring"
+        
+        # Competitive: Everything else (close spread, moderate total)
+        else:
+            return "⚖️ Competitive"
+    
+    df['script_cat'] = df.apply(categorize_script, axis=1)
+    
+    # Calculate position-specific script impact
+    def calculate_script_impact(row):
+        """
+        Adjust fantasy ceiling based on game script and position.
+        
+        Position impacts by script:
+        - QB: Best in shootouts (+15%), worst in low-scoring (-10%)
+        - RB: Best as favorite in blowout (+20%), worst as underdog (-15%)
+        - WR: Best in shootouts (+12%), decent in competitive (+5%)
+        - TE: Relatively script-neutral, slight boost in competitive (+5%)
+        - DST: Best in opponent blowout (dog) (+25%), worst in shootouts (-20%)
+        """
+        position = row.get('position', '')
+        script = row.get('script_cat', '')
+        spread = row.get('spread', 0)
+        
+        # Default neutral impact
+        impact = 1.0
+        
+        if 'Blowout (Fav)' in script:
+            if position == 'RB': impact = 1.20  # Run-heavy game script
+            elif position == 'QB': impact = 1.05  # Steady but not shootout
+            elif position == 'WR': impact = 0.95  # Fewer attempts
+            elif position == 'TE': impact = 1.00  # Neutral
+            elif position == 'DST': impact = 0.80  # Likely to give up points
+        
+        elif 'Blowout (Dog)' in script:
+            if position == 'RB': impact = 0.85  # Game script away from run
+            elif position == 'QB': impact = 1.10  # Garbage time passing
+            elif position == 'WR': impact = 1.08  # Volume in catchup mode
+            elif position == 'TE': impact = 1.05  # Safety valve targets
+            elif position == 'DST': impact = 1.25  # Sacks, turnovers likely
+        
+        elif 'Shootout' in script:
+            if position == 'QB': impact = 1.15  # Optimal script
+            elif position == 'WR': impact = 1.12  # High volume passing
+            elif position == 'RB': impact = 1.05  # Some volume but pass-heavy
+            elif position == 'TE': impact = 1.08  # Red zone targets
+            elif position == 'DST': impact = 0.80  # High points allowed
+        
+        elif 'Low-Scoring' in script:
+            if position == 'DST': impact = 1.15  # Defensive struggle
+            elif position == 'RB': impact = 1.05  # Run-heavy game
+            elif position == 'QB': impact = 0.90  # Limited attempts
+            elif position == 'WR': impact = 0.92  # Fewer targets
+            elif position == 'TE': impact = 0.95  # Limited volume
+        
+        else:  # Competitive
+            if position == 'TE': impact = 1.05  # Steady targets
+            elif position == 'WR': impact = 1.05  # Balanced attack
+            elif position == 'QB': impact = 1.02  # Normal game flow
+            elif position == 'RB': impact = 1.02  # Balanced usage
+            elif position == 'DST': impact = 1.00  # Neutral
+        
+        return impact
+    
+    df['script_impact'] = df.apply(calculate_script_impact, axis=1)
+    
+    return df
 
 
 # --------------------------------------------------------
@@ -158,6 +273,7 @@ def load_data():
             sharp_defense = pd.read_csv(data_dir / "sharp_defense.csv")
             weekly_proe = pd.read_csv(data_dir / "weekly_proe_2025.csv")
             weekly_stats = pd.read_csv(data_dir / "Weekly_Stats.csv")
+            weekly_dst_stats = pd.read_csv(data_dir / "Weekly_DST_Stats.csv")
             
             # Load or compute correlation scores
             team_correlations = None
@@ -206,20 +322,29 @@ def load_data():
             if 'avg_dk' not in players.columns:
                 players['avg_dk'] = players['proj']
             
-            # Calculate hits_4x from Weekly_Stats.csv
+            # Calculate hits_4x from Weekly_Stats.csv and Weekly_DST_Stats.csv
             # Count how many times each player scored 4x their current salary
             if 'hits_4x' not in players.columns:
                 hits_4x_dict = {}
                 for _, player_row in players.iterrows():
                     player_name = player_row['name']
+                    player_position = player_row.get('position', '')
                     current_salary = player_row['salary']
                     target_points = (current_salary / 1000.0) * 4  # 4x value threshold
                     
-                    # Get player's historical games from Weekly_Stats
-                    player_games = weekly_stats[
-                        (weekly_stats['Player'] == player_name) &
-                        (weekly_stats['DK_Points'].notna())
-                    ]
+                    # Use appropriate data source based on position
+                    if player_position == 'DST':
+                        # Get DST historical games from Weekly_DST_Stats
+                        player_games = weekly_dst_stats[
+                            (weekly_dst_stats['Player'] == player_name) &
+                            (weekly_dst_stats['DK_Points'].notna())
+                        ]
+                    else:
+                        # Get player's historical games from Weekly_Stats (QB, RB, WR, TE)
+                        player_games = weekly_stats[
+                            (weekly_stats['Player'] == player_name) &
+                            (weekly_stats['DK_Points'].notna())
+                        ]
                     
                     # Count games where DK_Points >= 4x current salary
                     hits = len(player_games[player_games['DK_Points'] >= target_points])
@@ -241,6 +366,13 @@ def load_data():
             
             itt_dict = matchups.set_index("Init")["ITT"].to_dict()
             players["implied_total"] = players["team"].map(itt_dict).fillna(0)
+            
+            # Add game total for each team
+            total_dict = matchups.set_index("Init")["Total"].to_dict()
+            players["game_total"] = players["team"].map(total_dict).fillna(0)
+            
+            # Calculate game script projections
+            players = calculate_game_script(players)
             
             # Add PROE data (Pass Rate Over Expected)
             # Get current week's PROE data
@@ -866,7 +998,7 @@ def run():
         # Player pool size targets for 20-lineup GPP
         pool_targets = DFSConfig.POOL_TARGETS = DFSConfig.POOL_TARGETS
     
-        # Quick filter option
+        # Quick filter option - Row 1
         col_filter1, col_filter2, col_filter3, col_filter4 = st.columns([1, 1, 1.5, 1.5])
         with col_filter1:
             positions = sorted(df_filtered["position"].unique())
@@ -897,6 +1029,39 @@ def run():
                 step=0.5,
                 help="Filter players by projected ownership percentage"
             )
+        
+        # Filter Row 2 - Leverage
+        col_filter5, col_filter6, col_filter7 = st.columns([1.5, 1, 2.5])
+        with col_filter5:
+            # Leverage range filter
+            min_lev = float(df_filtered["leverage_boom"].min() * 100)
+            max_lev = float(df_filtered["leverage_boom"].max() * 100)
+            lev_range = st.slider(
+                "🎯 Leverage % (Boom - Own)",
+                min_value=min_lev,
+                max_value=max_lev,
+                value=(min_lev, max_lev),
+                step=0.5,
+                help="Filter by leverage score (positive = underowned relative to upside)"
+            )
+        with col_filter6:
+            leverage_sort = st.checkbox("📈 Sort by Leverage", value=False, help="Sort players by leverage score (highest first)")
+        with col_filter7:
+            st.caption("💡 **Leverage Guide**: >10% = High leverage | 5-10% = Medium | <5% = Low leverage")
+        
+        # Filter Row 3 - Game Script
+        col_filter8, col_filter9 = st.columns([2, 2])
+        with col_filter8:
+            # Game script filter
+            script_options = ["All"] + sorted(df_filtered["script_cat"].unique().tolist())
+            script_filter = st.multiselect(
+                "🎬 Game Script Filter",
+                options=script_options,
+                default=["All"],
+                help="Filter by game environment: Shootout (high scoring), Blowout (lopsided), Competitive (close), Low-Scoring (defensive)"
+            )
+        with col_filter9:
+            st.caption("💡 **Game Script Guide**: 🔥 Blowout(Fav) = Run-heavy | ⚡ Shootout = Pass volume | ⚖️ Competitive = Balanced | 🛡️ Low-Scoring = Defensive | ❄️ Blowout(Dog) = Garbage time")
 
         df_pos = df_filtered if pos_filter == "All" else df_filtered[df_filtered["position"] == pos_filter]
         
@@ -905,6 +1070,13 @@ def run():
         
         # Apply ownership filter
         df_pos = df_pos[(df_pos["dk_ownership"] * 100 >= own_range[0]) & (df_pos["dk_ownership"] * 100 <= own_range[1])]
+        
+        # Apply leverage filter
+        df_pos = df_pos[(df_pos["leverage_boom"] * 100 >= lev_range[0]) & (df_pos["leverage_boom"] * 100 <= lev_range[1])]
+        
+        # Apply game script filter
+        if "All" not in script_filter and len(script_filter) > 0:
+            df_pos = df_pos[df_pos["script_cat"].isin(script_filter)]
 
         display_df = df_pos.copy()
     
@@ -920,9 +1092,44 @@ def run():
         display_df["PROE"] = (display_df["proe"] * 100).round(1)  # Convert to percentage
         display_df["Salary"] = display_df["salary"]  # Keep raw value for color-coding
         display_df["Pts/$K"] = (display_df["ceiling_adj"] / (display_df["salary"] / 1000)).round(2)
+        
+        # Add Leverage Category column
+        def leverage_category(lev):
+            if lev >= 10:
+                return "🔥 High"
+            elif lev >= 5:
+                return "⚡ Medium"
+            elif lev >= 0:
+                return "✓ Low"
+            else:
+                return "⚠️ Negative"
+        
+        display_df["Lev_Cat"] = display_df["Lev (Boom-Own)%"].apply(leverage_category)
+        
+        # Add game script columns
+        display_df["Script_Cat"] = display_df["script_cat"]
+        display_df["Blowout_Prob%"] = (display_df["blowout_prob"] * 100).round(1)
+        display_df["Script_Impact"] = display_df["script_impact"].round(2)
     
         # Filter out players with 0% ownership
         display_df = display_df[display_df["dk_ownership"] > 0].copy()
+        
+        # Show leverage insights summary
+        if len(display_df) > 0:
+            high_lev = len(display_df[display_df["Lev (Boom-Own)%"] >= 10])
+            med_lev = len(display_df[(display_df["Lev (Boom-Own)%"] >= 5) & (display_df["Lev (Boom-Own)%"] < 10)])
+            low_lev = len(display_df[(display_df["Lev (Boom-Own)%"] >= 0) & (display_df["Lev (Boom-Own)%"] < 5)])
+            neg_lev = len(display_df[display_df["Lev (Boom-Own)%"] < 0])
+            
+            col_lev1, col_lev2, col_lev3, col_lev4 = st.columns(4)
+            with col_lev1:
+                st.metric("🔥 High Leverage", f"{high_lev} players", "≥10%", help="Players with 10%+ leverage (boom% well above ownership)")
+            with col_lev2:
+                st.metric("⚡ Medium Leverage", f"{med_lev} players", "5-10%", help="Players with moderate leverage")
+            with col_lev3:
+                st.metric("✓ Low Leverage", f"{low_lev} players", "0-5%", help="Players with minimal leverage")
+            with col_lev4:
+                st.metric("⚠️ Negative Leverage", f"{neg_lev} players", "<0%", help="Players with higher ownership than boom probability")
     
         # --------------------------------------------------------
         # Calculate Normalized Player Ranking (0-100 scale)
@@ -1121,11 +1328,17 @@ def run():
         display_df = display_df.drop(columns=['leverage_score', 'boom_score', 'bust_score', 
                                               'ceiling_raw', 'value_raw', 'ceiling_score', 'value_score', 
                                               'wr_variance_bonus', 'rb_gamescript_bonus', 'rb_volume_bonus', 'qb_gamescript_bonus', 'proe_bonus'])
+        
+        # Sort by leverage if checkbox is enabled
+        if leverage_sort:
+            display_df = display_df.sort_values(by="Lev (Boom-Own)%", ascending=False)
 
         cols = [
             "name", "team", "opponent", "position", "Salary", "Pts/$K",
             "proj_adj", "stddev_adj", "ceiling_adj", "max_dk", "avg_dk", "floor_25", "ceil_75",
-            "Boom%", "Bust%", "Own%", "Lev (Boom-Own)%", "PROE", "Player_Rank", "hits_4x"
+            "Boom%", "Bust%", "Own%", "Lev (Boom-Own)%", "Lev_Cat", 
+            "Script_Cat", "Blowout_Prob%", "Script_Impact",
+            "PROE", "Player_Rank", "hits_4x"
         ]
 
         # --------------------------------------------------------
@@ -1193,12 +1406,58 @@ def run():
                 return "background-color: #E67E22; color: white;"  # Orange
             else:  # <-8% = heavy run environment
                 return "background-color: #E74C3C; color: white;"  # Red
+        
+        # Leverage category color function
+        def lev_cat_color(val):
+            """Color leverage categories: High = green, Medium = yellow, Low = amber, Negative = red"""
+            if pd.isna(val) or val == "":
+                return ""
+            if "High" in str(val):
+                return "background-color: #27AE60; color: white; font-weight: bold;"  # Dark green
+            elif "Medium" in str(val):
+                return "background-color: #F1C40F; color: black;"  # Yellow
+            elif "Low" in str(val):
+                return "background-color: #E67E22; color: white;"  # Orange
+            else:  # Negative
+                return "background-color: #E74C3C; color: white;"  # Red
+        
+        # Game script category color function
+        def script_cat_color(val):
+            """Color game script categories: Shootout/Blowout(Fav) = green, Competitive = yellow, Low-Scoring/Blowout(Dog) = amber"""
+            if pd.isna(val) or val == "":
+                return ""
+            if "Shootout" in str(val):
+                return "background-color: #8E44AD; color: white; font-weight: bold;"  # Purple (high scoring)
+            elif "Blowout (Fav)" in str(val):
+                return "background-color: #27AE60; color: white; font-weight: bold;"  # Dark green
+            elif "Blowout (Dog)" in str(val):
+                return "background-color: #3498DB; color: white;"  # Blue
+            elif "Competitive" in str(val):
+                return "background-color: #F1C40F; color: black;"  # Yellow
+            else:  # Low-Scoring
+                return "background-color: #95A5A6; color: white;"  # Gray
+        
+        # Script impact color function (multiplier)
+        def script_impact_color(val):
+            """Color script impact: >1.10 = green, 1.05-1.10 = light green, 0.95-1.05 = yellow, <0.95 = red"""
+            if pd.isna(val):
+                return ""
+            if val >= 1.10:
+                return "background-color: #27AE60; color: white; font-weight: bold;"  # Dark green
+            elif val >= 1.05:
+                return "background-color: #2ECC71; color: black;"  # Green
+            elif val >= 0.95:
+                return "background-color: #F1C40F; color: black;"  # Yellow
+            elif val >= 0.85:
+                return "background-color: #E67E22; color: white;"  # Orange
+            else:
+                return "background-color: #E74C3C; color: white;"  # Red
     
         styled = (
             display_df[cols]
             .style
-            .format("{:.1f}", subset=["proj_adj", "stddev_adj", "ceiling_adj", "max_dk", "avg_dk", "floor_25", "ceil_75", "Player_Rank", "PROE"])
-            .format("{:.2f}", subset=["Pts/$K"])
+            .format("{:.1f}", subset=["proj_adj", "stddev_adj", "ceiling_adj", "max_dk", "avg_dk", "floor_25", "ceil_75", "Player_Rank", "PROE", "Blowout_Prob%"])
+            .format("{:.2f}", subset=["Pts/$K", "Script_Impact"])
             .format("{:.1f}", subset=["Boom%", "Bust%", "Own%", "Lev (Boom-Own)%"])
             .format("{:.0f}", subset=["hits_4x"])
             .format("${:,.0f}", subset=["Salary"])  # Currency format for salary
@@ -1209,6 +1468,10 @@ def run():
             .map(rag_relative(display_df, "Bust%", reverse=True), subset=["Bust%"])
             .map(ownership_color, subset=["Own%"])  # Fixed thresholds for ownership
             .map(rag_relative(display_df, "Lev (Boom-Own)%"), subset=["Lev (Boom-Own)%"])
+            .map(lev_cat_color, subset=["Lev_Cat"])  # Leverage category colors
+            .map(script_cat_color, subset=["Script_Cat"])  # Game script category colors
+            .map(rag_relative(display_df, "Blowout_Prob%"), subset=["Blowout_Prob%"])  # Higher blowout prob = red (volatile)
+            .map(script_impact_color, subset=["Script_Impact"])  # Script impact multiplier colors
             .map(proe_color, subset=["PROE"])  # PROE-specific color scheme
             .map(rag_relative(display_df, "Player_Rank"), subset=["Player_Rank"])  # Higher rank = better
             .map(rag_relative(display_df, "hits_4x"), subset=["hits_4x"])
