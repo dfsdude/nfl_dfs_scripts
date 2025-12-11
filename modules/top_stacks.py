@@ -7,11 +7,18 @@ import os
 from pathlib import Path
 from scipy import stats
 
-# Import correlation module
+# Import data loader
 try:
     import sys
     parent_dir = Path(__file__).parent.parent
     sys.path.insert(0, str(parent_dir))
+    from data.data_loader import load_matchups
+    DATA_LOADER_AVAILABLE = True
+except ImportError:
+    DATA_LOADER_AVAILABLE = False
+
+# Import correlation module
+try:
     from correlation_model import (
         build_team_player_roles,
         compute_team_correlations,
@@ -269,7 +276,7 @@ def load_data():
             
             # Load ROO projections (has everything we need!)
             players = pd.read_csv(roo_file)
-            matchups = pd.read_csv(data_dir / "Matchup.csv")
+            matchups = load_matchups() if DATA_LOADER_AVAILABLE else pd.read_csv(data_dir / "Matchup.csv")
             sharp_offense = pd.read_csv(data_dir / "sharp_offense.csv")
             sharp_defense = pd.read_csv(data_dir / "sharp_defense.csv")
             weekly_proe = pd.read_csv(data_dir / "weekly_proe_2025.csv")
@@ -385,7 +392,7 @@ def load_data():
             # Fallback to legacy data loading
             st.warning("⚠️ ROO projections not found, using legacy data sources")
             
-            matchups = pd.read_csv(data_dir / "Matchup.csv")
+            matchups = load_matchups() if DATA_LOADER_AVAILABLE else pd.read_csv(data_dir / "Matchup.csv")
             weekly_stats = pd.read_csv(data_dir / "Weekly_Stats.csv")
             sharp_offense = pd.read_csv(data_dir / "sharp_offense.csv")
             sharp_defense = pd.read_csv(data_dir / "sharp_defense.csv")

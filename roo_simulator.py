@@ -9,9 +9,28 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import os
+import sys
 from typing import Dict, Tuple
 import warnings
 warnings.filterwarnings('ignore')
+
+# Add parent directory to path for imports
+parent_dir = Path(__file__).parent
+sys.path.insert(0, str(parent_dir))
+
+# Import data loader
+from data.data_loader import load_matchups
+
+# Import advanced stats modules
+try:
+    from advanced_metrics import add_all_advanced_metrics
+    from correlation_model import load_fantasypros_data
+    from projection_adjustments import apply_all_adjustments
+    ADVANCED_STATS_AVAILABLE = True
+    print("Advanced stats modules loaded successfully")
+except ImportError as e:
+    ADVANCED_STATS_AVAILABLE = False
+    print(f"Advanced stats modules not available: {e}")
 
 # ============================================================================
 # CONFIGURATION
@@ -67,7 +86,7 @@ def load_data() -> Dict[str, pd.DataFrame]:
     data = {
         'weekly_stats': pd.read_csv(data_dir / "Weekly_Stats.csv"),
         'weekly_dst_stats': pd.read_csv(data_dir / "Weekly_DST_Stats.csv"),
-        'matchups': pd.read_csv(data_dir / "Matchup.csv"),
+        'matchups': load_matchups(),  # Use data_loader for automatic odds.csv transformation
         'sharp_offense': pd.read_csv(data_dir / "sharp_offense.csv"),
         'sharp_defense': pd.read_csv(data_dir / "sharp_defense.csv"),
         'salaries': pd.read_csv(data_dir / "Salaries_2025.csv"),
@@ -718,7 +737,10 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
         current_week_df = current_week_df.drop(columns=['Team_salary'])
     
     # Merge matchup data directly (more efficient than apply)
-    matchup_data = data['matchups'][['Init', 'Opp', 'ITT', 'Spread', 'Loc']].copy()
+    # Note: odds.csv doesn't have 'Loc' (home/away), only Init/Opp/Spread/Total/ITT
+    matchup_cols = ['Init', 'Opp', 'ITT', 'Spread', 'Total']
+    available_matchup_cols = [col for col in matchup_cols if col in data['matchups'].columns]
+    matchup_data = data['matchups'][available_matchup_cols].copy()
     matchup_data = matchup_data.rename(columns={'Init': 'Team'})
     
     current_week_df = current_week_df.merge(
@@ -729,9 +751,9 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     
     # Fill missing matchup data with defaults
     current_week_df['Opp'] = current_week_df['Opp'].fillna('')
-    current_week_df['ITT'] = current_week_df['ITT'].fillna(24.0)  # League avg
-    current_week_df['Spread'] = current_week_df['Spread'].fillna(0)
-    current_week_df['Loc'] = current_week_df['Loc'].fillna('Home')
+    current_week_df['ITT'] = current_week_df['ITT'].fillna(23.5)
+    current_week_df['Spread'] = current_week_df['Spread'].fillna(0.0)
+    # Note: 'Loc' (home/away) not available in odds.csv format
     
     # Team abbreviation to full name mapping (for Sharp Football data)
     abbrev_to_full = {
@@ -852,6 +874,52 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     # 4. Build distributions
     players_with_dist = build_distributions(current_week_df, player_volatility, league_avgs, data['weekly_proe'])
     
+    # 4.5. Apply Advanced Stats Adjustments (Phase 1 & 2)
+    if ADVANCED_STATS_AVAILABLE:
+        try:
+            print("\n" + "="*70)
+            print("LOADING ADVANCED STATS FOR PROJECTION ENHANCEMENT")
+            print("="*70)
+            
+            # Load FantasyPros data
+            fp_data = load_fantasypros_data()
+            
+            # Add engineered features
+            fp_enriched = add_all_advanced_metrics(fp_data)
+            
+            # Apply all adjustments
+            players_with_dist = apply_all_adjustments(
+                players_with_dist,
+                fp_enriched,
+                fp_data
+            )
+            
+            # Apply adjustments to distribution parameters
+            # Adjust mu_log (median projection) based on combined multiplier
+            players_with_dist['mu_log_original'] = players_with_dist['mu_log'].copy()
+            players_with_dist['mu_log'] = np.log(
+                np.exp(players_with_dist['mu_log']) * players_with_dist['combined_multiplier']
+            )
+            
+            # Optionally adjust sigma_log based on role momentum
+            # Rising roles → slightly more volatile (higher upside)
+            # Declining roles → slightly less volatile (capped upside)
+            players_with_dist['sigma_log'] = players_with_dist['sigma_log'] * (
+                1.0 + players_with_dist['role_momentum'] * 0.05
+            )
+            players_with_dist['sigma_log'] = players_with_dist['sigma_log'].clip(
+                ROOConfig.MIN_SIGMA_LOG, 
+                ROOConfig.MAX_SIGMA_LOG
+            )
+            
+            print(f"\n✓ Applied advanced stats adjustments to {len(players_with_dist)} players")
+            
+        except Exception as e:
+            print(f"\n⚠ Error applying advanced stats adjustments: {e}")
+            print("  Continuing with standard projections...")
+    else:
+        print("\n⚠ Advanced stats modules not available - using standard projections")
+    
     # 5. Run simulations
     results_df = run_simulations(players_with_dist)
     
@@ -859,13 +927,15 @@ def generate_roo_projections(output_filename: str = "roo_projections.csv") -> pd
     print("\nPreparing output...")
     
     output_cols = [
-        'Player', 'Team', 'Position', 'Salary', 'Opp', 'ITT', 'Spread', 'Loc',
+        'Player', 'Team', 'Position', 'Salary', 'Opp', 'ITT', 'Spread',
         'OWS_Median_Proj', 'OWS_Proj_Own',
         'Floor_Proj', 'Ceiling_Proj',
         'Sim_P10', 'Sim_P15', 'Sim_P25', 'Sim_P50', 'Sim_P75', 'Sim_P85', 'Sim_P90', 'Sim_P95',
         'Volatility_Index',
         'hist_games', 'hist_mean_fpts', 'hist_std_fpts', 'hist_max_fpts', 'effective_std_fpts',
-        'matchup_vol_multiplier', 'adj_std'
+        'matchup_vol_multiplier', 'adj_std',
+        # Advanced stats adjustment columns
+        'advanced_stats_multiplier', 'target_share_trend', 'role_momentum', 'combined_multiplier'
     ]
     
     # Filter to available columns
